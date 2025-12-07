@@ -10,120 +10,26 @@ Handles:
 """
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
-from typing import List, Dict, Any
-
-from evaluator import Evaluator, EvaluatorConfig, EvaluationResult
-from data_loader import load_conversations_from_file, load_all_conversations, get_all_headers, order_csv_headers
-from results_tracker import write_results_to_csv, append_results_to_csv
 
 from dotenv import load_dotenv
 
-
-def load_config(config_path: Path) -> EvaluatorConfig:
-    """
-    Load evaluator configuration from JSON file.
-
-    Args:
-        config_path: Path to the config JSON file
-
-    Returns:
-        EvaluatorConfig object
-    """
-    config_path = Path(config_path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_data = json.load(f)
-
-    config = EvaluatorConfig(**config_data)
-    # Set config_file path for tracking
-    config.config_file = str(config_path)
-    return config
+from eval_app import (
+    Evaluator,
+    load_config,
+    load_conversations_from_file,
+    load_all_conversations,
+    get_all_headers,
+    order_csv_headers,
+    write_results_to_csv,
+    append_results_to_csv,
+    evaluate_conversations,
+)
 
 
-def evaluate_conversations(
-    evaluator: Evaluator,
-    conversations: List[Dict[str, Any]],
-    conversation_field: str = "conversation",
-) -> List[Dict[str, Any]]:
-    """
-    Evaluate a list of conversations.
-
-    Args:
-        evaluator: Initialized Evaluator instance
-        conversations: List of conversation dictionaries from data_loader
-        conversation_field: Field name containing the conversation text to evaluate
-
-    Returns:
-        List of result dictionaries combining conversation data with evaluation results
-    """
-    results = []
-
-    for idx, conv in enumerate(conversations, 1):
-        conversation_id = conv.get("conversationId", f"unknown_{idx}")
-        logging.info(f"Evaluating conversation {idx}/{len(conversations)}: {conversation_id}")
-
-        # Get the conversation text to evaluate
-        conversation_text = conv.get(conversation_field, "")
-
-        if not conversation_text:
-            logging.warning(
-                f"Conversation {conversation_id} has no '{conversation_field}' field, skipping"
-            )
-            # Still add it to results with evaluation failure
-            result = conv.copy()
-            result.update({
-                "evaluatorModel": evaluator.model_name,
-                "evaluation_config_file": evaluator.config_file,
-                "evaluation_decode_failed": True,
-                "evaluation_error": "Missing conversation text",
-            })
-            results.append(result)
-            continue
-
-        try:
-            # Evaluate the conversation
-            eval_result: EvaluationResult = evaluator.evaluate(conversation_text)
-
-            # Combine original conversation data with evaluation results
-            result = conv.copy()
-            result.update({
-                "evaluatorModel": eval_result.model,
-                "evaluation_config_file": eval_result.config_file,
-                "evaluation_decode_failed": eval_result.decode_failed,
-            })
-
-            # Add evaluation response fields if available
-            if eval_result.full_response:
-                # Add each field from the evaluation response as a separate column
-                for field_name, field_value in eval_result.full_response.items():
-                    result[f"evaluation_{field_name}"] = field_value
-            else:
-                logging.warning(f"Conversation {conversation_id} evaluation returned no response")
-
-            results.append(result)
-
-        except Exception as e:
-            logging.error(f"Error evaluating conversation {conversation_id}: {e}")
-            # Add conversation with error information
-            result = conv.copy()
-            result.update({
-                "evaluatorModel": evaluator.model_name,
-                "evaluation_config_file": evaluator.config_file,
-                "evaluation_decode_failed": True,
-                "evaluation_error": str(e),
-            })
-            results.append(result)
-
-    return results
-
-
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run evaluations on conversation data from JSON files"
     )

@@ -8,5 +8,8 @@ pydantic>=2.5.0,<3.0.0
 # Environment variable management
 python-dotenv>=1.0.0
 
+# Streamlit for the web UI
+streamlit>=1.51.0
+
 # Jupyter kernel support (optional - for using venv in Jupyter notebooks)
 ipykernel

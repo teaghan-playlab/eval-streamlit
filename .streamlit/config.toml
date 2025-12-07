@@ -1,0 +1,30 @@
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+showSidebarNavigation = false
+toolbarMode = "minimal"
+showErrorDetails = false
+
+[theme]
+# Base theme
+base = "light"
+
+# Color scheme - Anthropic inspired
+primaryColor = "#7a9c6b"  # Sage green for interactive elements
+backgroundColor = "#fdfdf8"  # Soft cream background
+secondaryBackgroundColor = "#f5f4ef"  # Slightly darker cream for sections
+textColor = "#3d3a2a"  # Deep olive brown text
+linkColor = "#7a9c6b"  # Match primary color for links
+# Border and radius settings
+baseRadius = "0.75rem"  # Anthropic-style rounded corners
+borderColor = "#e8e6df"  # Subtle border color
+
+# Font (will be overridden by custom CSS for Lexend and Montserrat)
+font = "sans serif"
+
+[ui]
+hideTopBar = true

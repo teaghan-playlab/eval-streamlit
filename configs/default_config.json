@@ -1,45 +1,35 @@
 {
   "system_prompt": "You are an expert evaluator analyzing teacher-AI interactions within Ghana's educational technology platform. Your task is to evaluate conversations between teachers and an AI assistant that helps create lesson plans for Year 2 curriculum across Mathematics, English Language, General Science, and Social Studies.\n\n## Your Task\n\nYou will be provided with a conversation between a teacher and an AI chatbot. Your job is to evaluate the AI chatbot's performance based on the evaluation categories provided in the schema. Each category has specific criteria that you should use to determine whether it should be marked as true or false.\n\n## Evaluation Approach\n\n1. Carefully review the entire conversation, paying attention to both the teacher's messages and the AI chatbot's responses.\n2. For each evaluation category in the schema, first provide your reasoning in the reasoning field (explaining what evidence you found or didn't find).\n3. Then mark the corresponding boolean field as true or false based on your rigorous assessment.\n4. Be thorough and evidence-based in your evaluation - look for explicit, strong evidence rather than passing mentions.\n5. Your reasoning should clearly explain the basis for your boolean decision.\n\n## Important Guidelines\n\n- Evaluate the conversation as a whole, considering the full context\n- For categories that require ≥80% evidence, ensure you find strong, explicit evidence (not just passing mentions)\n- Baseline questions (initial setup questions) should be ignored when evaluating engagement-related categories\n- Always fill in the reasoning field before the corresponding boolean field\n\n## Output Format\n\nRespond with a JSON object containing both reasoning (string) and boolean (true/false) fields for each category in the provided schema. Fill in reasoning fields first, then the corresponding boolean values. Base your evaluation strictly on the criteria described in each field's description.",
   "model_name": "claude-haiku-4-5",
-  "fields": {
+  "categories": {
     "successful_output": {
-      "type": "bool",
       "description": "True if the final LLM response is complete (not truncated), tailored to teacher's context, learner-centered, actionable for classroom use, and matches the requested task type. Score 4-5/5 = True, 0-3/5 = False."
     },
     "gesi_alignment": {
-      "type": "bool",
       "description": "True if ≥80% evidence of GESI standard present. Must show multiple explicit references to: gender balance in examples/activities, inclusive language and practices, accessibility considerations, diverse learning needs, equitable participation strategies. Score 1 if ≥4/5 checks present (80%)."
     },
     "twenty_first_century_skills_alignment": {
-      "type": "bool",
       "description": "True if ≥80% evidence of 21st Century Skills standard present. Must show multiple explicit references to: critical thinking activities, creativity/creative problem-solving, collaboration strategies, communication skills, digital literacy (if applicable), problem-solving approaches. Score 1 if ≥4/5 checks present (80%)."
     },
     "national_values_alignment": {
-      "type": "bool",
       "description": "True if ≥80% evidence of National Values standard present. Must show multiple explicit references to: Ghanaian cultural contexts, local examples/scenarios, community connections, national identity elements, cultural responsiveness."
     },
     "national_teaching_standards_alignment": {
-      "type": "bool",
       "description": "True if ≥80% evidence of National Teaching Standards present. Must show multiple explicit references to: clear learning objectives, evidence-based pedagogy, assessment strategies, differentiation approaches, professional teaching practices, reflective practice."
     },
     "assessment_framework_alignment": {
-      "type": "bool",
       "description": "True if ≥80% evidence of Assessment Framework present. Must show explicit and detailed: assessment methods specified, success criteria defined, feedback mechanisms, formative/summative approaches, student self-assessment options."
     },
     "modification_requests": {
-      "type": "bool",
       "description": "True if ANY modification requests present in user messages after baseline. Includes: direct requests to change output (make shorter/simpler), requests to add/remove elements, requests to replace or try alternatives, requests to adjust scope or format."
     },
     "context_clarification_provided": {
-      "type": "bool",
       "description": "True if ANY context/clarification provided in user messages after baseline. Includes: detailed class context (class size, ability levels), resource constraints (no textbooks, limited materials), clarifying learner needs (hearing difficulties, language learners), refining the request (specific activity types needed)."
     },
     "feedback_provided": {
-      "type": "bool",
       "description": "True if ANY feedback provided in user messages after baseline. Includes: clear positive feedback (perfect, great, works well), constructive/critical feedback (too complex, too long), evaluative requests implying inadequacy or seeking better alternatives."
     },
     "comprehensive_quality": {
-      "type": "bool",
       "description": "True if ALL criteria met."
     }
   }

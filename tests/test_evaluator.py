@@ -6,12 +6,17 @@ Tests the evaluator with a hardcoded sample conversation.
 Loads ANTHROPIC_API_KEY from .env file.
 """
 
-import json
 import logging
+import sys
 from pathlib import Path
+
 from dotenv import load_dotenv
 
-from evaluator import Evaluator, EvaluatorConfig
+# Add project root to path so we can import eval_app
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from eval_app import Evaluator, load_config
 
 
 def main():
@@ -31,10 +36,7 @@ def main():
         return 1
 
     logging.info(f"Loading configuration from {config_path}")
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_data = json.load(f)
-
-    config = EvaluatorConfig(**config_data)
+    config = load_config(config_path)
 
     # Initialize evaluator
     logging.info("Initializing evaluator")

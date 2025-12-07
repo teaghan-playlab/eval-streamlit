@@ -30,7 +30,7 @@ class EvaluatorConfig:
     """Configuration for the Evaluator."""
     system_prompt: str  # System prompt text (can be provided directly or loaded from file)
     model_name: str
-    fields: Dict[str, Dict[str, Any]]  # Field definitions: {"field_name": {"type": "str", "description": "..."}}
+    categories: Dict[str, Dict[str, Any]]  # Category definitions: {"category_name": {"description": "..."}}
     system_prompt_path: Optional[str] = None  # Optional: path to system prompt file (if system_prompt not provided)
     base_url: Optional[str] = None  # Not used with direct Anthropic API, kept for compatibility
     config_file: Optional[str] = None  # Path to config file for tracking
@@ -55,7 +55,7 @@ class Evaluator:
         Initialize the Evaluator.
 
         Args:
-            config: Configuration object with system prompt path, model name, and field definitions
+            config: Configuration object with system prompt path, model name, and category definitions
             client: Optional pre-configured Anthropic client. If not provided, one will be created.
             api_key: Optional API key. If not provided, will use ANTHROPIC_API_KEY env var.
         """
@@ -88,85 +88,53 @@ class Evaluator:
         self.temperature = 0.0  # Use deterministic temperature for evaluations
         self.last_payload: Optional[BaseModel] = None
 
-        # Dynamically create the response model from config.fields
-        self.response_model = self._create_response_model(config.fields)
+        # Dynamically create the response model from categories
+        self.response_model = self._create_response_model(config.categories)
         
         # Pre-compute the output format for Anthropic API
         self.output_format = self._get_output_format()
 
         logging.info(
             f"Initialized Evaluator with model {self.model_name} "
-            f"and {len(config.fields)} evaluation fields"
+            f"and {len(config.categories)} evaluation categories"
         )
 
-    def _create_response_model(self, fields: Dict[str, Dict[str, Any]]) -> Type[BaseModel]:
+    def _create_response_model(self, categories: Dict[str, Dict[str, Any]]) -> Type[BaseModel]:
         """
-        Dynamically create a Pydantic model from field definitions.
-        Automatically generates reasoning fields for each boolean field.
+        Dynamically create a Pydantic model from category definitions.
+        Automatically generates reasoning fields for each category (all categories are boolean).
 
         Args:
-            fields: Dictionary mapping field names to their definitions.
-                   Each definition should have 'type' and 'description' keys.
+            categories: Dictionary mapping category names to their definitions.
+                       Each definition should have a 'description' key.
 
         Returns:
             A Pydantic BaseModel class with the specified fields.
         """
         field_definitions = {}
-        
-        # Map string type names to Python types
-        type_mapping = {
-            "str": str,
-            "string": str,
-            "int": int,
-            "integer": int,
-            "float": float,
-            "bool": bool,
-            "boolean": bool,
-            "list": list,
-            "dict": dict,
-        }
 
-        # Process fields in order to maintain schema field order
-        # For each boolean field, create a reasoning field first, then the boolean field
-        for field_name, field_config in fields.items():
-            field_type_str = field_config.get("type", "str").lower()
-            field_description = field_config.get("description", f"Field {field_name}")
+        # Process categories in order to maintain schema field order
+        # For each category, create a reasoning field first, then the boolean field
+        for category_name, category_config in categories.items():
+            description = category_config.get("description", f"Category {category_name}")
             
-            # Get the Python type
-            python_type = type_mapping.get(field_type_str, str)
+            # Create reasoning field first
+            reasoning_field_name = f"{category_name}_reasoning"
+            reasoning_description = (
+                f"A concise (one sentence) reasoning statement for your evaluation of the {category_name} category based on the criteria provided."
+            )
             
-            # If this is a boolean field, create a reasoning field first
-            if python_type == bool:
-                reasoning_field_name = f"{field_name}_reasoning"
-                reasoning_description = (
-                    f"A concise (one sentence) reasoning statement for your evaluation of the {field_name} category based on the criteria provided."
-                )
-                
-                # Add reasoning field (required string to avoid anyOf in schema)
-                # Using str (not Optional[str]) prevents anyOf branches
-                field_definitions[reasoning_field_name] = (
-                    str,
-                    Field(..., description=reasoning_description)
-                )
-                
-                # Then add the boolean field (required)
-                field_definitions[field_name] = (
-                    python_type,
-                    Field(..., description=field_description)
-                )
-            else:
-                # For non-boolean fields, add them as-is
-                # String fields use str (not Optional) to avoid anyOf
-                if python_type == str:
-                    field_definitions[field_name] = (
-                        str,
-                        Field(..., description=field_description)
-                    )
-                else:
-                    field_definitions[field_name] = (
-                        python_type,
-                        Field(..., description=field_description)
-                    )
+            # Add reasoning field (required string to avoid anyOf in schema)
+            field_definitions[reasoning_field_name] = (
+                str,
+                Field(..., description=reasoning_description)
+            )
+            
+            # Then add the boolean category field (required)
+            field_definitions[category_name] = (
+                bool,
+                Field(..., description=description)
+            )
 
         # Create the model dynamically
         return create_model("EvaluationResponse", **field_definitions)

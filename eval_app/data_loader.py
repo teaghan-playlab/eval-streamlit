@@ -307,34 +307,3 @@ def order_csv_headers(headers: List[str]) -> List[str]:
     ordered_headers = ordered_metadata + evaluation_metadata + evaluation_fields + starter_inputs + conversation_field + other_fields
     
     return ordered_headers
-
-
-if __name__ == "__main__":
-    # Example usage
-    import sys
-    
-    logging.basicConfig(level=logging.INFO)
-    
-    if len(sys.argv) > 1:
-        data_dir = Path(sys.argv[1])
-    else:
-        # Default to data directory relative to this file
-        data_dir = Path(__file__).parent / "data"
-    
-    conversations = load_all_conversations(data_dir)
-    
-    if conversations:
-        print(f"\nLoaded {len(conversations)} conversations")
-        print(f"\nFirst conversation keys: {list(conversations[0].keys())}")
-        print(f"\nAll headers: {get_all_headers(conversations)}")
-        
-        # Show example of first conversation
-        if conversations:
-            print("\n--- Example conversation ---")
-            first_conv = conversations[0]
-            for key, value in first_conv.items():
-                if key == "conversation":
-                    print(f"{key}: {value[:200]}...")  # Truncate long conversation
-                else:
-                    print(f"{key}: {value}")
-
