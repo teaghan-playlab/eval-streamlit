@@ -1,0 +1,12 @@
+# Anthropic API SDK for direct API access
+anthropic==0.75.0
+
+# Pydantic for data validation and schema generation
+# Note: pydantic 2.0.0 has build issues with Python 3.12, using 2.5+ for compatibility
+pydantic>=2.5.0,<3.0.0
+
+# Environment variable management
+python-dotenv>=1.0.0
+
+# Jupyter kernel support (optional - for using venv in Jupyter notebooks)
+ipykernel
