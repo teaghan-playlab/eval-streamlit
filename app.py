@@ -29,7 +29,7 @@ from eval_app import (
 load_dotenv()
 
 # Set page config must be the first Streamlit command
-st.set_page_config(page_title="Conversation Evaluation Lab", layout="wide")
+st.set_page_config(page_title="EvalLab", page_icon="📋", layout="wide")
 
 # User-facing limits (kept in one place for easy adjustment)
 MAX_CATEGORIES = int(os.getenv("MAX_CATEGORIES", 10))
@@ -338,6 +338,7 @@ def render_conversation_uploader_and_selector() -> None:
     # Show a small preview of the first few conversations (metadata only)
     preview_count = min(5, len(conversations))
     preview_rows: List[Dict[str, Any]] = []
+    st.markdown("Conversations preview:")
     for conv in conversations[:preview_count]:
         preview_rows.append(
             {
@@ -430,12 +431,47 @@ def run_evaluations_and_collect_results() -> None:
         selected = random.sample(conversations, num)
     else:
         selected = conversations[:num]
+    
+    # Progress UI elements
+    progress_bar = st.progress(0)
+    status_placeholder = st.empty()
+    detail_placeholder = st.empty()
 
-    with st.spinner("Running evaluations..."):
+    def _progress_callback(
+        idx: int,
+        total_count: int,
+        original_conv: Dict[str, Any],
+        result_row: Dict[str, Any],
+    ) -> None:
+        """Update Streamlit progress indicators for each evaluated conversation."""
+        # Basic numeric progress
+        percentage = int((idx / max(1, total_count)) * 100)
+        progress_bar.progress(percentage)
+
+        conversation_id = original_conv.get("conversationId", f"conversation_{idx}")
+        status_placeholder.write(f"Evaluated {idx} of {total_count} conversations ")
+
+        # Show whether the latest evaluation succeeded or failed, plus any error message.
+        decode_failed = result_row.get("evaluation_decode_failed", False)
+        error_message = result_row.get("evaluation_error")
+
+        if decode_failed or error_message:
+            # Prefer explicit error text when available
+            message = error_message or "Evaluation decode failed for this conversation."
+            detail_placeholder.error(
+                f"Evaluation for `{conversation_id}` **failed**: {message}"
+            )
+        else:
+            detail_placeholder.info(
+                f"Evaluation for `{conversation_id}` **completed successfully**."
+            )
+
+    with st.spinner("Running AI evaluation..."):
         results = evaluate_conversations(
             evaluator,
             selected,
             conversation_field="conversation",
+            progress_callback=_progress_callback,
         )
 
     st.session_state["results"] = results

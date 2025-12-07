@@ -17,12 +17,19 @@ Prototype Streamlit app for running structured evaluations over conversation log
    pip install -r requirements.txt
    ```
 
-3. **Set required environment variables** (e.g. in a `.env` file or your shell):
+3. **Set up environment variables**:
 
+   Copy the example environment file and update it with your values:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Then edit `.env` and set:
    - `ANTHROPIC_API_KEY` – API key used by the evaluator.
    - `EVAL_APP_ACCESS_CODE` – simple access code required to use the Streamlit UI.
 
-## Running the Streamlit app
+4. **Running the Streamlit app**
 
 From the `eval-streamlit` directory:
 
@@ -37,9 +44,9 @@ Then open the URL printed in the terminal (typically `http://localhost:8501`) an
 You can also run evaluations from the command line using the existing script:
 
 ```bash
-python scripts/run_evaluations.py configs/config1.json data/your_conversations.json -o results.csv
+python scripts/run_evaluations.py configs/default_config.json data/your_conversations.json -o results.csv
 ```
 
-- **Config JSON** (`configs/config1.json`) defines the evaluator system prompt, model, and categories.
+- **Config JSON** (e.g., `configs/default_config.json`) defines the evaluator system prompt, model, and categories.
 - **Data path** can be a single JSON file or a directory containing multiple JSON files.
 - Results are written to the specified CSV file.
