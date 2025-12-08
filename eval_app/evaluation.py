@@ -159,7 +159,7 @@ class Evaluator:
             "schema": transformed_schema,
         }
 
-    def evaluate(self, text: str) -> EvaluationResult:
+    def evaluate(self, text: str, use_prompt_caching: bool = False) -> EvaluationResult:
         """
         Run evaluation on the given text.
 
@@ -183,7 +183,7 @@ class Evaluator:
         )
 
         try:
-            return self._evaluate_with_schema(text)
+            return self._evaluate_with_schema(text, use_prompt_caching=use_prompt_caching)
         except Exception as exc:  # pylint: disable=broad-except
             logging.exception("Structured evaluation failed: %s", exc)
 
@@ -204,7 +204,7 @@ class Evaluator:
 
             return fallback
 
-    def _evaluate_with_schema(self, text: str) -> EvaluationResult:
+    def _evaluate_with_schema(self, text: str, use_prompt_caching: bool = False) -> EvaluationResult:
         """
         Perform evaluation using Anthropic's structured outputs.
 
@@ -235,14 +235,26 @@ class Evaluator:
             logging.debug(input_preview)
             logging.debug("-" * 60)
 
-            # Make API call with structured outputs
+            # Make API call with structured outputs.
+            # Optionally use Anthropic prompt caching for the (potentially large) shared system prompt
+            # by converting the plain string system prompt into a content block with cache_control.
+            if use_prompt_caching:
+                system = [
+                    {
+                        "type": "text",
+                        "text": self.system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            else:
+                system = self.system_prompt
             response = self.client.beta.messages.create(
                 model=self.model_name,
                 max_tokens=4096,  # Reasonable default, can be made configurable
                 temperature=self.temperature,
                 betas=[self.STRUCTURED_OUTPUTS_BETA],
                 output_format=self.output_format,
-                system=self.system_prompt,
+                system=system,
                 messages=[
                     {"role": "user", "content": text}
                 ],

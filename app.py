@@ -461,10 +461,6 @@ def run_evaluations_and_collect_results() -> None:
             detail_placeholder.error(
                 f"Evaluation for `{conversation_id}` **failed**: {message}"
             )
-        else:
-            detail_placeholder.info(
-                f"Evaluation for `{conversation_id}` **completed successfully**."
-            )
 
     with st.spinner("Running AI evaluation..."):
         results = evaluate_conversations(
@@ -495,17 +491,27 @@ def render_results_section() -> None:
     if not results:
         st.info("No evaluation results yet. Run evaluations to see results here.")
         return
+    st.markdown("Results preview (for a full report, use the download button below):")
 
     # Show a small table of key columns (omit full conversation for readability)
     display_rows: List[Dict[str, Any]] = []
-    for row in results:
-        display_rows.append(
-            {
-                "conversationId": row.get("conversationId", ""),
-                "evaluatorModel": row.get("evaluatorModel", ""),
-                "evaluationSuccessful": not row.get("evaluation_decode_failed", False),
-            }
-        )
+    for row in results[:10]:
+        base_row: Dict[str, Any] = {
+            "conversationId": row.get("conversationId", ""),
+            #"evaluationSuccessful": not row.get("evaluation_decode_failed", False),
+        }
+
+        # Include boolean evaluation category results (omit reasoning text fields)
+        for key, value in row.items():
+            if (
+                key.startswith("evaluation_")
+                and not key.endswith("_reasoning")
+                and not key.endswith("_decode_failed")
+                and isinstance(value, bool)
+            ):
+                base_row[key] = value
+
+        display_rows.append(base_row)
 
     st.dataframe(display_rows, width="stretch")
 
@@ -525,26 +531,26 @@ def main() -> None:
     render_access_gate()
 
     st.title("Conversation Evaluation Lab")
-    st.write("Run structured evaluations over conversation logs using Anthropic.")
+    st.write("Run structured evaluations over conversation logs using Claude.")
 
-    st.subheader("Define evaluation categories")
+    st.subheader("Evaluation categories")
     with st.expander("Edit the categories", expanded=False):
         render_categories_editor()
 
-    st.subheader("Upload conversations")
+    st.subheader("Conversation data")
     render_conversation_uploader_and_selector()
 
-    st.subheader("Run evaluations")
+    st.subheader("Process conversations")
     ready, error_message = validate_ready_to_run()
     if not ready and error_message:
         st.warning(error_message)
     with st.columns(3)[1]:
-        run_button = st.button("Run evaluations", width="stretch", type="primary", disabled=not ready)
+        run_button = st.button("Run", width="stretch", type="primary", disabled=not ready)
     if run_button and ready:
         run_evaluations_and_collect_results()
 
     if st.session_state.get("results"):
-        st.subheader("Download results")
+        st.subheader("Results")
         render_results_section()
 
 

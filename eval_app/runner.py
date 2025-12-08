@@ -36,6 +36,7 @@ def evaluate_conversations(
     results: List[Dict[str, Any]] = []
     total = len(conversations)
 
+    use_prompt_caching = len(conversations) > 2
     for idx, conv in enumerate(conversations, 1):
         conversation_id = conv.get("conversationId", f"unknown_{idx}")
         logging.info(
@@ -73,7 +74,7 @@ def evaluate_conversations(
 
         try:
             # Evaluate the conversation
-            eval_result: EvaluationResult = evaluator.evaluate(conversation_text)
+            eval_result: EvaluationResult = evaluator.evaluate(conversation_text, use_prompt_caching=use_prompt_caching)
 
             # Combine original conversation data with evaluation results
             result = conv.copy()
