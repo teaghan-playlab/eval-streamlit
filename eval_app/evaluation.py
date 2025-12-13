@@ -34,6 +34,7 @@ class EvaluatorConfig:
     system_prompt_path: Optional[str] = None  # Optional: path to system prompt file (if system_prompt not provided)
     base_url: Optional[str] = None  # Not used with direct Anthropic API, kept for compatibility
     config_file: Optional[str] = None  # Path to config file for tracking
+    context: Optional[str] = None  # Optional additional context to append to system prompt
 
 
 class Evaluator:
@@ -73,15 +74,25 @@ class Evaluator:
 
         # Load system prompt (from direct field or file)
         if config.system_prompt:
-            self.system_prompt = config.system_prompt
+            base_system_prompt = config.system_prompt
         elif config.system_prompt_path:
             system_prompt_path = Path(config.system_prompt_path)
             if not system_prompt_path.exists():
                 raise FileNotFoundError(f"System prompt file not found: {config.system_prompt_path}")
             with open(system_prompt_path, "r", encoding="utf-8") as fh:
-                self.system_prompt = fh.read()
+                base_system_prompt = fh.read()
         else:
             raise ValueError("Either system_prompt or system_prompt_path must be provided in config")
+
+        # Append context to system prompt if present
+        if config.context and config.context.strip():
+            self.system_prompt = (
+                base_system_prompt
+                + "\n\n" + "=" * 60 + "\n\nEvaluation Context Information Below\n\n" + "=" * 60 + "\n\n"
+                + config.context
+            )
+        else:
+            self.system_prompt = base_system_prompt
 
         self.model_name = config.model_name
         self.config_file = config.config_file or ""

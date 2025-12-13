@@ -30,7 +30,7 @@ def main():
     )
 
     # Load configuration
-    config_path = Path("configs/config1.json")
+    config_path = Path("configs/default_config.json")
     if not config_path.exists():
         logging.error(f"Config file not found: {config_path}")
         return 1

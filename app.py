@@ -70,6 +70,7 @@ def ensure_session_state_keys() -> None:
         "base_config": None,
         "config": None,  # {"system_prompt": str, "model_name": str}
         "categories": [],  # [{"label": str, "key": str, "description": str}]
+        "evaluator_context": "",  # Additional context for evaluator
         "conversations": [],
         "num_to_evaluate": None,
         "sample_randomly": False,
@@ -128,6 +129,11 @@ def _initialize_config_and_categories_from_base() -> None:
     if not st.session_state["categories"]:
         categories_data = base_config.get("categories", {})
         _set_categories(fields_to_categories(categories_data))
+
+    # Initialize evaluator context from base config if not already set
+    if st.session_state.get("evaluator_context") == "":
+        context = base_config.get("context", "")
+        st.session_state["evaluator_context"] = context
 
 
 def _set_categories(categories: List[Dict[str, str]]) -> None:
@@ -242,6 +248,10 @@ def _on_uploaded_config_change() -> None:
             [{"label": "Category 1", "key": "category_1", "description": ""}]
         )
 
+    # Update evaluator context from uploaded config
+    context = config_data.get("context", "")
+    st.session_state["evaluator_context"] = context
+
 
 def render_categories_editor() -> None:
     """Render the Evaluation Categories editor UI."""
@@ -273,6 +283,8 @@ def render_categories_editor() -> None:
         categories_data = base.get("categories", {})
         categories = fields_to_categories(categories_data)
         _set_categories(categories)
+        # Reset evaluator context to default
+        st.session_state["evaluator_context"] = base.get("context", "")
         st.rerun()
 
     # Render all category text boxes in one dedicated function.
@@ -309,12 +321,13 @@ def render_categories_editor() -> None:
     st.session_state["categories"] = updated_categories
 
     # Allow user to download the current evaluator config (system prompt,
-    # model name, and categories) as JSON for reuse in future runs.
+    # model name, categories, and context) as JSON for reuse in future runs.
     cfg = st.session_state.get("config") or {}
     config_payload = {
         "system_prompt": cfg.get("system_prompt", ""),
         "model_name": cfg.get("model_name", ""),
         "categories": categories_to_fields(updated_categories),
+        "context": st.session_state.get("evaluator_context", ""),
     }
     config_json = json.dumps(config_payload, indent=2)
 
@@ -440,6 +453,7 @@ def _run_evaluations_worker(
     conversations: List[Dict[str, Any]],
     num_to_evaluate: int,
     sample_randomly: bool,
+    evaluator_context: str,
     cancel_event: threading.Event,
     progress_dict: Dict[str, Any],
 ) -> None:
@@ -466,6 +480,7 @@ def _run_evaluations_worker(
             model_name=config["model_name"],
             categories=categories_fields,
             config_file="streamlit_inline_config",
+            context=evaluator_context,
         )
 
         logger.info("Creating Evaluator instance...")
@@ -637,9 +652,6 @@ def render_results_section() -> None:
 
 def main() -> None:
     """Streamlit app entry point."""
-    logger.info("=" * 60)
-    logger.info("Main function called - new script run")
-    logger.info("=" * 60)
     
     ensure_session_state_keys()
     render_access_gate()
@@ -651,6 +663,16 @@ def main() -> None:
     with st.expander("Edit the categories", expanded=False):
         render_categories_editor()
 
+    st.subheader("Evaluator context")
+    with st.expander("Add context", expanded=False):
+        evaluator_context = st.text_area(
+            "Useful background information for the evaluator to improve the assessments",
+            value=st.session_state.get("evaluator_context", ""),
+            help="Provide any additional context or instructions that should be considered during evaluation.",
+            height=350,
+        )
+        st.session_state["evaluator_context"] = evaluator_context
+
     st.subheader("Conversation data")
     render_conversation_uploader_and_selector()
 
@@ -660,7 +682,6 @@ def main() -> None:
         st.warning(error_message)
 
     is_running = st.session_state.get("is_running", False)
-    logger.info(f"Current state: ready={ready}, is_running={is_running}, error_message={error_message}")
 
     cols = st.columns(3)
     with cols[1]:
@@ -717,10 +738,11 @@ def main() -> None:
         conversations = st.session_state["conversations"]
         num_to_evaluate = st.session_state["num_to_evaluate"]
         sample_randomly = st.session_state["sample_randomly"]
+        evaluator_context = st.session_state.get("evaluator_context", "")
         
         logger.info(f"Read from session_state: config={bool(config)}, categories={len(categories)}, "
                    f"conversations={len(conversations)}, num_to_evaluate={num_to_evaluate}, "
-                   f"sample_randomly={sample_randomly}")
+                   f"sample_randomly={sample_randomly}, evaluator_context length={len(evaluator_context)}")
 
         worker = threading.Thread(
             target=_run_evaluations_worker,
@@ -730,6 +752,7 @@ def main() -> None:
                 conversations,
                 num_to_evaluate,
                 sample_randomly,
+                evaluator_context,
                 cancel_event,
                 progress_dict,
             ),
