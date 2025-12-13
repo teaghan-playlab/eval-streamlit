@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List
+import threading
 
 from dotenv import load_dotenv
 import streamlit as st
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 from eval_app import (
     Evaluator,
@@ -65,6 +75,13 @@ def ensure_session_state_keys() -> None:
         "sample_randomly": False,
         "results": [],
         "csv_bytes": None,
+        # Long-running evaluation state
+        "is_running": False,
+        "cancel_event": None,  # threading.Event for cancellation
+        "progress_dict": None,  # Dict for thread-safe progress updates
+        "progress": 0.0,
+        "status_text": "",
+        "detail_text": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -374,113 +391,206 @@ def validate_ready_to_run() -> tuple[bool, str | None]:
     Returns:
         Tuple of (is_valid, error_message). If is_valid is True, error_message is None.
     """
+    logger.debug("Validating readiness to run...")
+    
     if not st.session_state.get("access_granted"):
+        logger.debug("Validation failed: access not granted")
         return False, "Access code is required. Please enter the access code."
 
     cfg = st.session_state.get("config") or {}
     if not cfg.get("model_name"):
+        logger.debug("Validation failed: model_name missing")
         return False, "Model name is required. Please configure the model name."
     if not cfg.get("system_prompt"):
+        logger.debug("Validation failed: system_prompt missing")
         return False, "System prompt is required. Please configure the system prompt."
 
     categories = st.session_state.get("categories") or []
     if len(categories) < 1:
+        logger.debug(f"Validation failed: no categories (count: {len(categories)})")
         return False, f"At least 1 category is required. Please add at least one evaluation category."
     if len(categories) > MAX_CATEGORIES:
+        logger.debug(f"Validation failed: too many categories ({len(categories)} > {MAX_CATEGORIES})")
         return False, f"Too many categories. Maximum {MAX_CATEGORIES} categories are supported. Please remove some categories."
 
     conversations = st.session_state.get("conversations") or []
     if not conversations:
+        logger.debug("Validation failed: no conversations loaded")
         return False, "No conversations loaded. Please upload a conversations JSON file."
 
     num = st.session_state.get("num_to_evaluate")
     if not isinstance(num, int) or num < 1:
+        logger.debug(f"Validation failed: invalid num_to_evaluate ({num})")
         return False, "Invalid number of conversations to evaluate. Please select a valid number."
     if num > min(MAX_CONVERSATIONS, len(conversations)):
+        logger.debug(f"Validation failed: num ({num}) exceeds max ({min(MAX_CONVERSATIONS, len(conversations))})")
         return False, f"Number to evaluate ({num}) exceeds the maximum allowed ({min(MAX_CONVERSATIONS, len(conversations))}). Please select a smaller number."
 
     if not os.getenv("ANTHROPIC_API_KEY"):
+        logger.debug("Validation failed: ANTHROPIC_API_KEY not set")
         return False, "ANTHROPIC_API_KEY is not set in the environment. Please set the API key."
 
+    logger.debug("Validation passed: ready to run")
     return True, None
 
 
-def run_evaluations_and_collect_results() -> None:
-    """Run evaluations on the selected conversations and store results."""
-    cfg = st.session_state["config"]
-    categories = categories_to_fields(st.session_state["categories"])
+def _run_evaluations_worker(
+    config: Dict[str, Any],
+    categories: List[Dict[str, str]],
+    conversations: List[Dict[str, Any]],
+    num_to_evaluate: int,
+    sample_randomly: bool,
+    cancel_event: threading.Event,
+    progress_dict: Dict[str, Any],
+) -> None:
+    """Background worker: run evaluations and update progress_dict.
 
-    eval_config = EvaluatorConfig(
-        system_prompt=cfg["system_prompt"],
-        model_name=cfg["model_name"],
-        categories=categories,
-        config_file="streamlit_inline_config",
-    )
-
-    evaluator = Evaluator(eval_config)
-
-    conversations: List[Dict[str, Any]] = st.session_state["conversations"]
-    num = st.session_state["num_to_evaluate"]
-    sample_randomly = st.session_state["sample_randomly"]
-
-    max_n = min(MAX_CONVERSATIONS, len(conversations))
-    num = max(1, min(num, max_n))
-
-    if sample_randomly:
-        random.seed()
-        selected = random.sample(conversations, num)
-    else:
-        selected = conversations[:num]
+    This function is intended to be executed in a separate thread. It should
+    not access st.session_state directly. Instead, it updates progress_dict
+    which the main thread will sync to session_state.
+    """
+    logger.info("Worker thread started")
+    logger.info(f"Config: model_name={config.get('model_name')}, system_prompt length={len(config.get('system_prompt', ''))}")
+    logger.info(f"Categories count: {len(categories)}")
+    logger.info(f"Conversations count: {len(conversations)}")
+    logger.info(f"Num to evaluate: {num_to_evaluate}, sample_randomly: {sample_randomly}")
     
-    # Progress UI elements
-    progress_bar = st.progress(0)
-    status_placeholder = st.empty()
-    detail_placeholder = st.empty()
+    try:
+        logger.info("Converting categories to fields...")
+        categories_fields = categories_to_fields(categories)
+        logger.info(f"Categories fields: {list(categories_fields.keys())}")
 
-    def _progress_callback(
-        idx: int,
-        total_count: int,
-        original_conv: Dict[str, Any],
-        result_row: Dict[str, Any],
-    ) -> None:
-        """Update Streamlit progress indicators for each evaluated conversation."""
-        # Basic numeric progress
-        percentage = int((idx / max(1, total_count)) * 100)
-        progress_bar.progress(percentage)
+        logger.info("Creating EvaluatorConfig...")
+        eval_config = EvaluatorConfig(
+            system_prompt=config["system_prompt"],
+            model_name=config["model_name"],
+            categories=categories_fields,
+            config_file="streamlit_inline_config",
+        )
 
-        conversation_id = original_conv.get("conversationId", f"conversation_{idx}")
-        status_placeholder.write(f"Evaluated {idx} of {total_count} conversations ")
+        logger.info("Creating Evaluator instance...")
+        evaluator = Evaluator(eval_config)
+        logger.info("Evaluator created successfully")
 
-        # Show whether the latest evaluation succeeded or failed, plus any error message.
-        decode_failed = result_row.get("evaluation_decode_failed", False)
-        error_message = result_row.get("evaluation_error")
+        max_n = min(MAX_CONVERSATIONS, len(conversations))
+        num = max(1, min(num_to_evaluate, max_n))
+        logger.info(f"Will evaluate {num} conversations (max_n={max_n}, requested={num_to_evaluate})")
 
-        if decode_failed or error_message:
-            # Prefer explicit error text when available
-            message = error_message or "Evaluation decode failed for this conversation."
-            detail_placeholder.error(
-                f"Evaluation for `{conversation_id}` **failed**: {message}"
+        if sample_randomly:
+            logger.info("Sampling conversations randomly...")
+            random.seed()
+            selected = random.sample(conversations, num)
+        else:
+            logger.info("Taking first N conversations...")
+            selected = conversations[:num]
+        
+        logger.info(f"Selected {len(selected)} conversations for evaluation")
+
+        # Reset progress state
+        logger.info("Initializing progress_dict...")
+        progress_dict["progress"] = 0.0
+        progress_dict["status_text"] = "Starting evaluation..."
+        progress_dict["detail_text"] = ""
+        progress_dict["results"] = []
+        progress_dict["csv_bytes"] = None
+        logger.info("Progress dict initialized")
+
+        def _should_cancel() -> bool:
+            cancelled = cancel_event.is_set()
+            if cancelled:
+                logger.info("Cancel requested")
+            return cancelled
+
+        def _progress_callback(
+            idx: int,
+            total_count: int,
+            original_conv: Dict[str, Any],
+            result_row: Dict[str, Any],
+        ) -> None:
+            """Update numeric progress and last status in progress_dict."""
+            if total_count > 0:
+                progress_dict["progress"] = idx / float(total_count)
+
+            conversation_id = original_conv.get(
+                "conversationId", f"conversation_{idx}"
+            )
+            progress_dict["status_text"] = (
+                f"Evaluated {idx} of {total_count} conversations"
             )
 
-    with st.spinner("Running AI evaluation..."):
+            decode_failed = result_row.get("evaluation_decode_failed", False)
+            error_message = result_row.get("evaluation_error")
+
+            if decode_failed or error_message:
+                message = error_message or (
+                    "Evaluation decode failed for this conversation."
+                )
+                progress_dict["detail_text"] = (
+                    f"Evaluation for `{conversation_id}` failed: {message}"
+                )
+                logger.warning(f"Evaluation failed for {conversation_id}: {message}")
+            else:
+                progress_dict["detail_text"] = (
+                    f"Evaluation for `{conversation_id}` completed successfully."
+                )
+            
+            logger.info(f"Progress: {idx}/{total_count} ({conversation_id})")
+
+        # Determine worker parallelism from environment (default to 1 = sequential)
+        max_workers_env = os.getenv("EVAL_MAX_WORKERS", "1")
+        try:
+            max_workers = int(max_workers_env)
+        except ValueError:
+            max_workers = 1
+
+        if max_workers < 1:
+            max_workers = 1
+        logger.info(f"Using max_workers: {max_workers}")
+
+        logger.info("Starting evaluate_conversations...")
         results = evaluate_conversations(
             evaluator,
             selected,
             conversation_field="conversation",
             progress_callback=_progress_callback,
+            should_cancel=_should_cancel,
+            max_workers=max_workers,
         )
+        logger.info(f"evaluate_conversations completed. Got {len(results) if results else 0} results")
 
-    st.session_state["results"] = results
+        progress_dict["results"] = results
 
-    # Build CSV
-    headers = order_csv_headers(get_all_headers(results))
+        if results:
+            logger.info("Building CSV from results...")
+            # Build CSV only if we have at least one result row
+            headers = order_csv_headers(get_all_headers(results))
+            logger.info(f"CSV headers: {headers[:5]}... ({len(headers)} total)")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-        tmp_path = Path(tmp.name)
-    write_results_to_csv(results, tmp_path, fieldnames=headers)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+                tmp_path = Path(tmp.name)
+            write_results_to_csv(results, tmp_path, fieldnames=headers)
+            logger.info(f"CSV written to {tmp_path}")
 
-    with open(tmp_path, "rb") as f:
-        st.session_state["csv_bytes"] = f.read()
+            with open(tmp_path, "rb") as f:
+                progress_dict["csv_bytes"] = f.read()
+            logger.info(f"CSV bytes loaded: {len(progress_dict['csv_bytes'])} bytes")
+
+        # Mark completion
+        if not cancel_event.is_set():
+            progress_dict["progress"] = 1.0
+            if not progress_dict.get("status_text"):
+                progress_dict["status_text"] = "Evaluation complete."
+            logger.info("Evaluation completed successfully")
+        else:
+            logger.info("Evaluation was cancelled")
+    except Exception as e:
+        logger.error(f"Error in worker thread: {e}", exc_info=True)
+        progress_dict["status_text"] = f"Error: {str(e)}"
+        progress_dict["detail_text"] = f"Worker thread encountered an error: {type(e).__name__}"
+    finally:
+        # Always clear running flag when worker exits
+        logger.info("Worker thread finishing, setting is_running=False")
+        progress_dict["is_running"] = False
 
 
 def render_results_section() -> None:
@@ -527,6 +637,10 @@ def render_results_section() -> None:
 
 def main() -> None:
     """Streamlit app entry point."""
+    logger.info("=" * 60)
+    logger.info("Main function called - new script run")
+    logger.info("=" * 60)
+    
     ensure_session_state_keys()
     render_access_gate()
 
@@ -544,10 +658,120 @@ def main() -> None:
     ready, error_message = validate_ready_to_run()
     if not ready and error_message:
         st.warning(error_message)
-    with st.columns(3)[1]:
-        run_button = st.button("Run", width="stretch", type="primary", disabled=not ready)
-    if run_button and ready:
-        run_evaluations_and_collect_results()
+
+    is_running = st.session_state.get("is_running", False)
+    logger.info(f"Current state: ready={ready}, is_running={is_running}, error_message={error_message}")
+
+    cols = st.columns(3)
+    with cols[1]:
+        run_button = st.button(
+            "Run",
+            width="stretch",
+            type="primary",
+            disabled=not ready or is_running,
+        )
+    
+    logger.debug(f"Run button state: clicked={run_button}, disabled={not ready or is_running}")
+
+    # Initialize thread-safe communication objects
+    if st.session_state.get("cancel_event") is None:
+        logger.info("Creating new cancel_event")
+        st.session_state["cancel_event"] = threading.Event()
+    if st.session_state.get("progress_dict") is None:
+        logger.info("Creating new progress_dict")
+        st.session_state["progress_dict"] = {}
+
+    cancel_event: threading.Event = st.session_state["cancel_event"]
+    progress_dict: Dict[str, Any] = st.session_state["progress_dict"]
+
+    # Sync progress_dict to session_state (for display)
+    if progress_dict:
+        logger.debug(f"Syncing progress_dict to session_state. Keys: {list(progress_dict.keys())}")
+        if "progress" in progress_dict:
+            st.session_state["progress"] = progress_dict["progress"]
+        if "status_text" in progress_dict:
+            st.session_state["status_text"] = progress_dict["status_text"]
+        if "detail_text" in progress_dict:
+            st.session_state["detail_text"] = progress_dict["detail_text"]
+        if "results" in progress_dict:
+            st.session_state["results"] = progress_dict["results"]
+        if "csv_bytes" in progress_dict:
+            st.session_state["csv_bytes"] = progress_dict["csv_bytes"]
+        if "is_running" in progress_dict:
+            st.session_state["is_running"] = progress_dict["is_running"]
+
+    # Start a background worker thread when Run is clicked
+    if run_button and ready and not is_running:
+        logger.info("Run button clicked, starting worker thread...")
+        logger.info(f"ready={ready}, is_running={is_running}")
+        
+        cancel_event.clear()
+        progress_dict.clear()
+        progress_dict["is_running"] = True
+        st.session_state["is_running"] = True
+        logger.info("Cleared cancel_event and initialized progress_dict")
+
+        # Read all data from session_state before starting thread
+        config = st.session_state["config"]
+        categories = st.session_state["categories"]
+        conversations = st.session_state["conversations"]
+        num_to_evaluate = st.session_state["num_to_evaluate"]
+        sample_randomly = st.session_state["sample_randomly"]
+        
+        logger.info(f"Read from session_state: config={bool(config)}, categories={len(categories)}, "
+                   f"conversations={len(conversations)}, num_to_evaluate={num_to_evaluate}, "
+                   f"sample_randomly={sample_randomly}")
+
+        worker = threading.Thread(
+            target=_run_evaluations_worker,
+            args=(
+                config,
+                categories,
+                conversations,
+                num_to_evaluate,
+                sample_randomly,
+                cancel_event,
+                progress_dict,
+            ),
+            daemon=True,
+        )
+        logger.info("Starting worker thread...")
+        worker.start()
+        logger.info(f"Worker thread started. Thread ID: {worker.ident}, Alive: {worker.is_alive()}")
+
+        # Immediately rerun to show running state
+        logger.info("Triggering rerun...")
+        st.rerun()
+
+    # While a run is in progress, show progress and a Cancel button
+    if is_running:
+        logger.debug(f"Run in progress. Progress dict keys: {list(progress_dict.keys())}")
+        progress = float(st.session_state.get("progress", 0.0))
+        progress_pct = int(max(0.0, min(1.0, progress)) * 100)
+        logger.debug(f"Displaying progress: {progress} ({progress_pct}%)")
+        st.progress(progress_pct)
+
+        status_text = st.session_state.get("status_text")
+        if status_text:
+            st.write(status_text)
+            logger.debug(f"Status text: {status_text}")
+
+        detail_text = st.session_state.get("detail_text")
+        if detail_text:
+            st.caption(detail_text)
+            logger.debug(f"Detail text: {detail_text}")
+
+        with cols[2]:
+            if st.button("Cancel", type="secondary"):
+                logger.info("Cancel button clicked")
+                cancel_event.set()
+                st.write("Cancellation requested. Finishing current in-flight calls...")
+                st.rerun()
+
+        # Auto-refresh UI while background worker is running so we pick up
+        # new values written into progress_dict by the thread.
+        time.sleep(0.5)
+        st.rerun()
 
     if st.session_state.get("results"):
         st.subheader("Results")
