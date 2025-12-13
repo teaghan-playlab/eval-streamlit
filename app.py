@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 from eval_app import (
     Evaluator,
     EvaluatorConfig,
+    Summarizer,
+    SummarizerConfig,
     categories_to_fields,
     evaluate_conversations,
     fields_to_categories,
@@ -83,6 +85,11 @@ def ensure_session_state_keys() -> None:
         "csv_bytes": None,
         # Result inspection state
         "selected_result_idx": 0,
+        # Summarization state
+        "summarizer_selected_category_key": None,
+        "summarizer_task": "",
+        "summarizer_stats": None,
+        "summarizer_output": None,
         # Long-running evaluation state
         "is_running": False,
         "cancel_event": None,  # threading.Event for cancellation
@@ -141,6 +148,67 @@ def _initialize_config_and_categories_from_base() -> None:
     if st.session_state.get("evaluator_context") == "":
         context = base_config.get("context", "")
         st.session_state["evaluator_context"] = context
+
+    # Initialize summarizer task from base config if not already set
+    if st.session_state.get("summarizer_task") == "":
+        st.session_state["summarizer_task"] = str(base_config.get("summarizer_task", "") or "")
+
+
+def _parse_bool(value: Any) -> bool | None:
+    """Parse booleans from either bools or common string values."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in ("true", "1", "yes"):
+        return True
+    if s in ("false", "0", "no"):
+        return False
+    return None
+
+
+def _mean_int(values: List[Any]) -> int | None:
+    nums: List[int] = []
+    for v in values:
+        try:
+            nums.append(int(v))
+        except Exception:
+            continue
+    if not nums:
+        return None
+    return int(round(sum(nums) / float(len(nums))))
+
+
+def _select_summary_examples(
+    *,
+    rows_true: List[Dict[str, Any]],
+    rows_false: List[Dict[str, Any]],
+    max_examples: int,
+) -> List[Dict[str, Any]]:
+    """Pick a roughly balanced set of examples (True/False) in a stable order."""
+    max_examples = max(1, int(max_examples))
+    # Keep deterministic ordering: createdAt then conversationId
+    def _key(r: Dict[str, Any]) -> str:
+        return str(r.get("createdAt") or "") + str(r.get("conversationId") or "")
+
+    rows_true = sorted(rows_true, key=_key)
+    rows_false = sorted(rows_false, key=_key)
+
+    if not rows_false:
+        return rows_true[:max_examples]
+    if not rows_true:
+        return rows_false[:max_examples]
+
+    half = max_examples // 2
+    picked = rows_true[:half] + rows_false[: (max_examples - half)]
+    return picked
+
+
+def _clear_summarizer_outputs() -> None:
+    """Clear cached summarizer outputs when inputs change."""
+    st.session_state["summarizer_stats"] = None
+    st.session_state["summarizer_output"] = None
 
 
 def _set_categories(categories: List[Dict[str, str]]) -> None:
@@ -407,7 +475,7 @@ def render_conversation_uploader_and_selector() -> None:
     )
 
     st.session_state["sample_randomly"] = st.checkbox(
-        "Randomly sample conversations (instead of taking the first N)",
+        f"Randomly sample conversations (instead of taking the first {st.session_state['num_to_evaluate']})",
         value=False,
     )
 
@@ -698,8 +766,8 @@ def render_results_section() -> None:
         st.markdown(
             f"**User messages:** `{meta['userMessageCount']}`  \n"
             f"**Provider messages:** `{meta['providerMessageCount']}`  \n"
-            f"**Avg user chars:** `{meta['avgUserMessageCharacters']}`  \n"
-            f"**Avg provider chars:** `{meta['avgProviderMessageCharacters']}`"
+            f"**Avg user characters:** `{meta['avgUserMessageCharacters']}`  \n"
+            f"**Avg provider characters:** `{meta['avgProviderMessageCharacters']}`"
         )
 
         # Evaluation fields: render a markdown summary (boolean + reasoning)
@@ -744,6 +812,172 @@ def render_results_section() -> None:
                 mime="text/csv",
                 width="stretch",
             )
+
+    st.markdown("---")
+    st.subheader("Summarize results")
+
+    # Ensure base config is loaded so we can access summarizer defaults
+    _initialize_config_and_categories_from_base()
+    base_config = load_base_config()
+    summarizer_system_prompt = str(base_config.get("summarizer_system_prompt", "") or "")
+
+    categories: List[Dict[str, str]] = st.session_state.get("categories") or []
+    category_keys = [c.get("key", "") for c in categories if c.get("key")]
+    if not category_keys:
+        st.info("No categories available to summarize.")
+        return
+
+    # Default selected category
+    if st.session_state.get("summarizer_selected_category_key") not in category_keys:
+        st.session_state["summarizer_selected_category_key"] = category_keys[0]
+        _clear_summarizer_outputs()
+
+    def _format_cat(key: str) -> str:
+        for c in categories:
+            if c.get("key") == key:
+                label = c.get("label") or key
+                return f"{label}"
+        return key
+
+    selected_category_key = st.selectbox(
+        "Category",
+        options=category_keys,
+        key="summarizer_selected_category_key",
+        format_func=_format_cat,
+        on_change=_clear_summarizer_outputs,
+    )
+
+    # Task input (defaulted from config)
+    st.session_state["summarizer_task"] = st.text_area(
+        "Summarizer task",
+        value=st.session_state.get("summarizer_task", ""),
+        height=120,
+        on_change=_clear_summarizer_outputs,
+    )
+
+    # Compute stats for the selected category
+    eval_key = f"evaluation_{selected_category_key}"
+    reason_key = f"evaluation_{selected_category_key}_reasoning"
+
+    rows_true: List[Dict[str, Any]] = []
+    rows_false: List[Dict[str, Any]] = []
+    for row in results:
+        b = _parse_bool(row.get(eval_key))
+        if b is True:
+            rows_true.append(row)
+        elif b is False:
+            rows_false.append(row)
+
+    total_analyzed = len(rows_true) + len(rows_false)
+    success_rate_pct = (len(rows_true) / float(total_analyzed) * 100.0) if total_analyzed else 0.0
+
+    avg_user_msgs_true = _mean_int([r.get("userMessageCount") for r in rows_true])
+    avg_user_msgs_false = _mean_int([r.get("userMessageCount") for r in rows_false])
+    avg_user_chars_true = _mean_int([r.get("avgUserMessageCharacters") for r in rows_true])
+    avg_user_chars_false = _mean_int([r.get("avgUserMessageCharacters") for r in rows_false])
+
+    stats_block = {
+        "total_conversations_analyzed": total_analyzed,
+        "success_rate_percent": round(success_rate_pct, 1),
+        "avg_user_messages_true": avg_user_msgs_true,
+        "avg_user_messages_false": avg_user_msgs_false,
+        "avg_user_chars_true": avg_user_chars_true,
+        "avg_user_chars_false": avg_user_chars_false,
+    }
+
+    # Show stats immediately (even before calling the model)
+    st.markdown(
+        f"- **Total conversations analyzed**: `{stats_block['total_conversations_analyzed']}`\n"
+        f"- **Success rate**: `{stats_block['success_rate_percent']}%`"
+    )
+
+    st.dataframe(
+        [
+            {
+                "Metric": "Avg user messages",
+                "Successful Conversations": stats_block["avg_user_messages_true"],
+                "Unsuccessful Conversations": stats_block["avg_user_messages_false"],
+            },
+            {
+                "Metric": "Avg user characters",
+                "Successful Conversations": stats_block["avg_user_chars_true"],
+                "Unsuccessful Conversations": stats_block["avg_user_chars_false"],
+            },
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+
+    # Summarize button
+    max_examples = int(os.getenv("SUMMARIZER_MAX_EXAMPLES", "25"))
+    cols2 = st.columns(3)
+    with cols2[1]:
+        run_summary = st.button("Summarize results", type="primary", width="stretch", disabled=total_analyzed == 0)
+
+    if run_summary:
+        if not summarizer_system_prompt:
+            st.error("Missing `summarizer_system_prompt` in config.")
+            return
+        task = (st.session_state.get("summarizer_task") or "").strip()
+        if not task:
+            st.error("Please provide a summarizer task.")
+            return
+
+        # Find description from the editable categories
+        category_description = ""
+        for c in categories:
+            if c.get("key") == selected_category_key:
+                category_description = c.get("description", "") or ""
+                break
+
+        examples = _select_summary_examples(
+            rows_true=rows_true,
+            rows_false=rows_false,
+            max_examples=max_examples,
+        )
+
+        # Build example rows with only the requested fields
+        example_rows: List[Dict[str, Any]] = []
+        for r in examples:
+            example_rows.append(
+                {
+                    "conversationId": r.get("conversationId", ""),
+                    "createdAt": r.get("createdAt", ""),
+                    "userMessageCount": r.get("userMessageCount", 0),
+                    "providerMessageCount": r.get("providerMessageCount", 0),
+                    "avgUserMessageCharacters": r.get("avgUserMessageCharacters", 0),
+                    "avgProviderMessageCharacters": r.get("avgProviderMessageCharacters", 0),
+                    eval_key: r.get(eval_key),
+                    reason_key: r.get(reason_key, ""),
+                }
+            )
+
+        with st.spinner("Summarizing results..."):
+            summarizer = Summarizer(
+                SummarizerConfig(
+                    system_prompt=summarizer_system_prompt,
+                    model_name=(st.session_state.get("config") or {}).get("model_name", ""),
+                    config_file=st.session_state.get("config_file_name") or "",
+                )
+            )
+            summary_result = summarizer.summarize_category(
+                task=task,
+                category_key=selected_category_key,
+                category_description=category_description,
+                true_count=len(rows_true),
+                false_count=len(rows_false),
+                success_rate=(len(rows_true) / float(total_analyzed)) if total_analyzed else 0.0,
+                examples=example_rows,
+                max_tokens=1200,
+            )
+
+        st.session_state["summarizer_stats"] = stats_block
+        st.session_state["summarizer_output"] = summary_result.text
+        st.rerun()
+
+    if st.session_state.get("summarizer_output"):
+        st.markdown("### Summary")
+        st.markdown(str(st.session_state["summarizer_output"]))
 
 
 def main() -> None:
