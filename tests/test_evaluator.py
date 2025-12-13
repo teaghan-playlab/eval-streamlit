@@ -43,13 +43,13 @@ def main():
     evaluator = Evaluator(config)
 
     # Hardcoded sample conversation
-    sample_conversation = """**Provider Message:**
+    sample_conversation = """--- PROVIDER MESSAGE ---
 
 Thank you for providing those details! I can see you're planning two 120-minute lessons for 45 learners at Ideal College in Greater Accra, and you'd like support with learning activities, assessments, differentiation strategies, and reviewing a learning plan.
 
 Let me start by retrieving the curriculum content for **Week 1: Oral Language, Reading and Grammar Foundations** from the Year 2 English Language Teacher Manual.
 
-**Provider Message:**
+--- PROVIDER MESSAGE ---
 
 Excellent! I've retrieved the Week 1 content. Now let me present the key curriculum elements for this week:
 
@@ -130,11 +130,11 @@ The assessment strategies for the week will range from recall to extended critic
 
 **Or would you prefer a different combination?**
 
-**User Message:**
+--- USER MESSAGE ---
 
 Can you make the activities more challenging? Also, I have 60 students in my class and some have hearing difficulties. The timing works well though.
 
-**Provider Message:**
+--- PROVIDER MESSAGE ---
 
 I'll adjust the activities to be more challenging and incorporate strategies for students with hearing difficulties. Given your class size of 60 students, I'll also ensure the activities are suitable for larger groups.
 
@@ -154,11 +154,11 @@ Here's a revised lesson plan with more challenging activities:
 - Formative assessment strategies
 - Student self-assessment options]
 
-**User Message:**
+--- USER MESSAGE ---
 
 Perfect! This is exactly what I needed. Can you add more group work activities?
 
-**Provider Message:**
+--- PROVIDER MESSAGE ---
 
 Absolutely! I'll add more collaborative group work activities to enhance peer learning and engagement.
 

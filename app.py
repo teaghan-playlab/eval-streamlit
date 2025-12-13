@@ -55,11 +55,15 @@ def load_base_config() -> Dict[str, Any]:
     if "base_config" in st.session_state and st.session_state["base_config"] is not None:
         return st.session_state["base_config"]
 
-    config_path = _project_root() / "configs" / os.getenv("DEFAULT_CONFIG_FILE", "default_config.json")
+    config_file_name = os.getenv("DEFAULT_CONFIG_FILE", "default_config.json")
+    config_path = _project_root() / "configs" / config_file_name
     with open(config_path, "r", encoding="utf-8") as f:
         base_config = json.load(f)
 
     st.session_state["base_config"] = base_config
+    # Track the config file name
+    if st.session_state.get("config_file_name") is None:
+        st.session_state["config_file_name"] = f"configs/{config_file_name}"
     return base_config
 
 
@@ -69,6 +73,7 @@ def ensure_session_state_keys() -> None:
         "access_granted": False,
         "base_config": None,
         "config": None,  # {"system_prompt": str, "model_name": str}
+        "config_file_name": None,  # Name/path of the config file being used
         "categories": [],  # [{"label": str, "key": str, "description": str}]
         "evaluator_context": "",  # Additional context for evaluator
         "conversations": [],
@@ -76,6 +81,8 @@ def ensure_session_state_keys() -> None:
         "sample_randomly": False,
         "results": [],
         "csv_bytes": None,
+        # Result inspection state
+        "selected_result_idx": 0,
         # Long-running evaluation state
         "is_running": False,
         "cancel_event": None,  # threading.Event for cancellation
@@ -237,6 +244,10 @@ def _on_uploaded_config_change() -> None:
         "model_name": model_name,
     }
 
+    # Track the uploaded config file name
+    uploaded_file_name = uploaded.name if hasattr(uploaded, "name") else "uploaded_config.json"
+    st.session_state["config_file_name"] = uploaded_file_name
+
     # Update categories from uploaded config (or a single default category).
     # We intentionally do NOT call `st.rerun()` here: Streamlit will rerun
     # the script automatically after this on_change callback returns.
@@ -285,6 +296,9 @@ def render_categories_editor() -> None:
         _set_categories(categories)
         # Reset evaluator context to default
         st.session_state["evaluator_context"] = base.get("context", "")
+        # Reset config file name to default
+        config_file_name = os.getenv("DEFAULT_CONFIG_FILE", "default_config.json")
+        st.session_state["config_file_name"] = f"configs/{config_file_name}"
         st.rerun()
 
     # Render all category text boxes in one dedicated function.
@@ -375,7 +389,7 @@ def render_conversation_uploader_and_selector() -> None:
                 "conversationId": conv.get("conversationId", ""),
                 "createdAt": conv.get("createdAt", ""),
                 "userMessageCount": conv.get("userMessageCount", 0),
-                "messageCount": conv.get("messageCount", 0),
+                "providerMessageCount": conv.get("providerMessageCount", 0),
             }
         )
 
@@ -454,6 +468,7 @@ def _run_evaluations_worker(
     num_to_evaluate: int,
     sample_randomly: bool,
     evaluator_context: str,
+    config_file_name: str,
     cancel_event: threading.Event,
     progress_dict: Dict[str, Any],
 ) -> None:
@@ -479,7 +494,7 @@ def _run_evaluations_worker(
             system_prompt=config["system_prompt"],
             model_name=config["model_name"],
             categories=categories_fields,
-            config_file="streamlit_inline_config",
+            config_file=config_file_name,
             context=evaluator_context,
         )
 
@@ -616,7 +631,7 @@ def render_results_section() -> None:
     if not results:
         st.info("No evaluation results yet. Run evaluations to see results here.")
         return
-    st.markdown("Results preview (for a full report, use the download button below):")
+    st.markdown("**Preview:**")
 
     # Show a small table of key columns (omit full conversation for readability)
     display_rows: List[Dict[str, Any]] = []
@@ -640,14 +655,95 @@ def render_results_section() -> None:
 
     st.dataframe(display_rows, width="stretch")
 
-    if csv_bytes:
-        st.download_button(
-            label="Download entire evaluation results as CSV",
-            type="primary",
-            data=csv_bytes,
-            file_name="evaluation_results.csv",
-            mime="text/csv",
+    total_results = len(results)
+    idx_from_state = st.session_state.get("selected_result_idx", 0)
+    try:
+        idx_from_state = int(idx_from_state)
+    except Exception:
+        idx_from_state = 0
+    selected_idx = max(0, min(total_results - 1, idx_from_state))
+    st.session_state["selected_result_idx"] = selected_idx
+
+    def _format_result_option(i: int) -> str:
+        row = results[i] if 0 <= i < total_results else {}
+        cid = row.get("conversationId", "") or f"row_{i+1}"
+        app_name = row.get("appName", "")
+        created_at = row.get("createdAt", "")
+        prefix = f"{i+1}/{total_results} — {cid}"
+        suffix_parts = [p for p in [app_name, created_at] if p]
+        return f"{prefix} ({' | '.join(suffix_parts)})" if suffix_parts else prefix
+
+    @st.dialog("Evaluation details", width="large")
+    def _open_result_dialog() -> None:
+        # Conversation selection INSIDE the dialog
+        picked_idx = st.selectbox(
+            "Select a conversation",
+            options=list(range(total_results)),
+            index=selected_idx,
+            format_func=_format_result_option,
         )
+        st.session_state["selected_result_idx"] = int(picked_idx)
+        row: Dict[str, Any] = results[int(picked_idx)]
+
+        conversation_id = row.get("conversationId", "") or f"row_{int(picked_idx)+1}"
+        st.markdown(f"**Conversation:** `{conversation_id}`")
+
+        # Metadata (counts + averages)
+        meta = {
+            "userMessageCount": row.get("userMessageCount", 0),
+            "providerMessageCount": row.get("providerMessageCount", 0),
+            "avgUserMessageCharacters": row.get("avgUserMessageCharacters", 0),
+            "avgProviderMessageCharacters": row.get("avgProviderMessageCharacters", 0),
+        }
+        st.markdown(
+            f"**User messages:** `{meta['userMessageCount']}`  \n"
+            f"**Provider messages:** `{meta['providerMessageCount']}`  \n"
+            f"**Avg user chars:** `{meta['avgUserMessageCharacters']}`  \n"
+            f"**Avg provider chars:** `{meta['avgProviderMessageCharacters']}`"
+        )
+
+        # Evaluation fields: render a markdown summary (boolean + reasoning)
+        reasoning_suffix = "_reasoning"
+        eval_prefix = "evaluation_"
+        reasoning_keys = [
+            k for k in row.keys()
+            if isinstance(k, str) and k.startswith(eval_prefix) and k.endswith(reasoning_suffix)
+        ]
+        with st.expander("Evaluation", expanded=False):
+            if reasoning_keys:
+                lines: List[str] = []
+                for rk in sorted(reasoning_keys):
+                    base = rk[len(eval_prefix):-len(reasoning_suffix)]
+                    bk = f"{eval_prefix}{base}"
+                    value = row.get(bk, "")
+                    reasoning = row.get(rk, "")
+                    lines.append(f"#### {base}")
+                    lines.append(f"- **Value**: `{value}`")
+                    if reasoning:
+                        lines.append(f"- **Reasoning**: {reasoning}")
+                    lines.append("")
+                st.markdown("\n".join(lines))
+            else:
+                st.info("No structured evaluation fields found in this row.")
+
+        with st.expander("Conversation", expanded=False):
+            conversation_text = row.get("conversation", "") or ""
+            # Render as markdown (the conversation text already uses markdown headings/bold)
+            st.markdown(str(conversation_text))
+
+    cols = st.columns(3)
+    with cols[1]:
+        if st.button("Open details", type="primary", width="stretch"):
+            _open_result_dialog()
+        if csv_bytes:
+            st.download_button(
+                label="Download results",
+                type="secondary",
+                data=csv_bytes,
+                file_name="evaluation_results.csv",
+                mime="text/csv",
+                width="stretch",
+            )
 
 
 def main() -> None:
@@ -739,10 +835,12 @@ def main() -> None:
         num_to_evaluate = st.session_state["num_to_evaluate"]
         sample_randomly = st.session_state["sample_randomly"]
         evaluator_context = st.session_state.get("evaluator_context", "")
+        config_file_name = st.session_state.get("config_file_name", "default_config.json")
         
         logger.info(f"Read from session_state: config={bool(config)}, categories={len(categories)}, "
                    f"conversations={len(conversations)}, num_to_evaluate={num_to_evaluate}, "
-                   f"sample_randomly={sample_randomly}, evaluator_context length={len(evaluator_context)}")
+                   f"sample_randomly={sample_randomly}, evaluator_context length={len(evaluator_context)}, "
+                   f"config_file_name={config_file_name}")
 
         worker = threading.Thread(
             target=_run_evaluations_worker,
@@ -753,6 +851,7 @@ def main() -> None:
                 num_to_evaluate,
                 sample_randomly,
                 evaluator_context,
+                config_file_name,
                 cancel_event,
                 progress_dict,
             ),
@@ -796,6 +895,7 @@ def main() -> None:
         time.sleep(0.5)
         st.rerun()
 
+    st.markdown("---")
     if st.session_state.get("results"):
         st.subheader("Results")
         render_results_section()

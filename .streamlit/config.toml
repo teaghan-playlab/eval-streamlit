@@ -7,7 +7,7 @@ gatherUsageStats = false
 
 [client]
 showSidebarNavigation = false
-#toolbarMode = "minimal"
+toolbarMode = "minimal"
 showErrorDetails = false
 
 [theme]

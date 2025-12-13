@@ -38,6 +38,71 @@ def parse_user_start_message(content: str) -> Dict[str, str]:
     return headers
 
 
+def calculate_average_message_characters(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Calculate average message character counts for user and provider messages separately,
+    and count user/provider messages. Excludes user-start messages.
+    
+    Consecutive provider messages are treated as a single message (e.g., when tool calls
+    result in multiple provider messages before and after the tool call).
+    
+    Args:
+        messages: List of message dictionaries
+        
+    Returns:
+        Dictionary with 'avgUserMessageCharacters', 'avgProviderMessageCharacters',
+        'userMessageCount', and 'providerMessageCount' keys.
+        Returns 0.0 for averages if no messages of that type exist.
+    """
+    user_lengths = []
+    provider_lengths = []
+    user_count = 0
+    provider_count = 0
+    
+    # Track current consecutive provider message group
+    current_provider_length = 0
+
+    def _finalize_provider_group() -> None:
+        nonlocal current_provider_length, provider_count
+        if current_provider_length > 0:
+            provider_lengths.append(current_provider_length)
+            provider_count += 1
+            current_provider_length = 0
+    
+    for message in messages:
+        source = message.get("source", "")
+        content = message.get("content", "").strip()
+        
+        # Skip user-start messages and empty messages
+        if source == "user-start" or not content:
+            continue
+        
+        content_length = len(content)
+        
+        if source == "provider":
+            # Add to current provider message group (consecutive providers are combined)
+            current_provider_length += content_length
+            continue
+
+        # Any non-provider message breaks a provider run
+        _finalize_provider_group()
+
+        if source == "user":
+            # User messages are always individual
+            user_lengths.append(content_length)
+            user_count += 1
+    
+    # Finalize any remaining provider message group at the end
+    _finalize_provider_group()
+    
+    return {
+        "avgUserMessageCharacters": int(round(sum(user_lengths) / len(user_lengths))) if user_lengths else 0,
+        "avgProviderMessageCharacters": int(round(sum(provider_lengths) / len(provider_lengths))) if provider_lengths else 0,
+        "userMessageCount": user_count,
+        "providerMessageCount": provider_count,
+    }
+
+
 def format_conversation_messages(messages: List[Dict[str, Any]]) -> str:
     """
     Organize messages (excluding user-start) into a formatted conversation string.
@@ -46,8 +111,8 @@ def format_conversation_messages(messages: List[Dict[str, Any]]) -> str:
         messages: List of message dictionaries
         
     Returns:
-        Formatted conversation string with "**Provider Message:**\n\n" or 
-        "**User Message:**\n\n" prefixes
+        Formatted conversation string with unique delimiters:
+        "--- PROVIDER MESSAGE ---" or "--- USER MESSAGE ---" prefixes
     """
     conversation_parts = []
     
@@ -59,14 +124,15 @@ def format_conversation_messages(messages: List[Dict[str, Any]]) -> str:
         if source == "user-start" or not content:
             continue
         
-        # Determine prefix based on source
+        # Determine prefix based on source using triple-dash delimiters
+        # These markers are unlikely to appear in actual message content
         if source == "provider":
-            prefix = "**Provider Message:**\n\n"
+            prefix = "--- PROVIDER MESSAGE ---\n\n"
         elif source == "user":
-            prefix = "**User Message:**\n\n"
+            prefix = "--- USER MESSAGE ---\n\n"
         else:
             # Handle other sources (e.g., "user-start" already filtered)
-            prefix = f"**{source.title()} Message:**\n\n"
+            prefix = f"--- {source.upper()} MESSAGE ---\n\n"
         
         conversation_parts.append(prefix + content)
     
@@ -116,8 +182,6 @@ def load_conversations_from_file(file_path: Path) -> List[Dict[str, Any]]:
             # Extract conversation metrics
             metrics = conv.get("conversationMetric", {})
             processed_conv.update({
-                "userMessageCount": metrics.get("userMessageCount", 0),
-                "messageCount": metrics.get("messageCount", 0),
                 "flaggedMessageCount": metrics.get("flaggedMessageCount", 0),
                 "moderatedMessageCount": metrics.get("moderatedMessageCount", 0),
             })
@@ -137,12 +201,16 @@ def load_conversations_from_file(file_path: Path) -> List[Dict[str, Any]]:
                 custom_headers = parse_user_start_message(user_start_content)
                 processed_conv.update(custom_headers)
             
+            # Calculate average message characters and provider message count (excluding user-start)
+            avg_chars_and_counts = calculate_average_message_characters(messages)
+            processed_conv.update(avg_chars_and_counts)
+            
             # Format conversation (excluding user-start messages)
             conversation_text = format_conversation_messages(messages)
             
             # Prepend user-start content to conversation if it exists
             if user_start_content:
-                user_start_prefixed = "**User Starter Inputs:**\n\n" + user_start_content.strip()
+                user_start_prefixed = "--- USER STARTER INPUTS ---\n\n" + user_start_content.strip()
                 if conversation_text:
                     processed_conv["conversation"] = user_start_prefixed + "\n\n" + conversation_text
                 else:
@@ -218,7 +286,7 @@ def get_all_headers(conversations: List[Dict[str, Any]]) -> List[str]:
         "createdAt",
         "endedAt",
         "userMessageCount",
-        "messageCount",
+        "providerMessageCount",
         "flaggedMessageCount",
         "moderatedMessageCount",
         "conversation",
@@ -257,10 +325,12 @@ def order_csv_headers(headers: List[str]) -> List[str]:
         "userId",
         "chatbotModel",  # Chatbot model
         "evaluatorModel",  # Evaluator model
-        "messageCount",
         "userMessageCount",
+        "providerMessageCount",
         "flaggedMessageCount",
         "moderatedMessageCount",
+        "avgUserMessageCharacters",
+        "avgProviderMessageCharacters",
     ]
     
     # Separate headers into categories
