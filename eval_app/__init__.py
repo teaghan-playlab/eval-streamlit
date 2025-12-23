@@ -10,6 +10,7 @@ Public API (intended for use by callers):
 - load_conversations_from_file, load_all_conversations,
   get_all_headers, order_csv_headers           (from .data_loader)
 - write_results_to_csv, append_results_to_csv  (from .results_tracker)
+- DigDeeper, DigDeeperConfig, DigDeeperResult  (from .dig_deeper)
 """
 
 from .evaluation import Evaluator, EvaluatorConfig, EvaluationResult
@@ -27,15 +28,15 @@ from .data_loader import (
     order_csv_headers,
 )
 from .results_tracker import write_results_to_csv, append_results_to_csv
-from .summarization import Summarizer, SummarizerConfig, SummaryResult
+from .dig_deeper import DigDeeper, DigDeeperConfig, DigDeeperResult
 
 __all__ = [
     "Evaluator",
     "EvaluatorConfig",
     "EvaluationResult",
-    "Summarizer",
-    "SummarizerConfig",
-    "SummaryResult",
+    "DigDeeper",
+    "DigDeeperConfig",
+    "DigDeeperResult",
     "load_config",
     "fields_to_categories",
     "categories_to_fields",

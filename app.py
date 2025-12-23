@@ -9,7 +9,7 @@ import random
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import threading
 
 from dotenv import load_dotenv
@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 from eval_app import (
     Evaluator,
     EvaluatorConfig,
-    Summarizer,
-    SummarizerConfig,
+    DigDeeper,
+    DigDeeperConfig,
     categories_to_fields,
     evaluate_conversations,
     fields_to_categories,
@@ -81,15 +81,19 @@ def ensure_session_state_keys() -> None:
         "conversations": [],
         "num_to_evaluate": None,
         "sample_randomly": False,
+        # Evaluation-stage filtering
+        "eval_min_user_messages": 0,
         "results": [],
         "csv_bytes": None,
         # Result inspection state
         "selected_result_idx": 0,
-        # Summarization state
-        "summarizer_selected_category_key": None,
-        "summarizer_task": "",
-        "summarizer_stats": None,
-        "summarizer_output": None,
+        # Dig deeper state
+        "dig_deeper_selected_categories": [],
+        "dig_deeper_task": "",
+        "dig_deeper_output": None,
+        "dig_deeper_include_conversation": False,
+        "dig_deeper_min_user_messages": 0,
+        "dig_deeper_max_rows": 25,
         # Long-running evaluation state
         "is_running": False,
         "cancel_event": None,  # threading.Event for cancellation
@@ -149,12 +153,16 @@ def _initialize_config_and_categories_from_base() -> None:
         context = base_config.get("context", "")
         st.session_state["evaluator_context"] = context
 
-    # Initialize summarizer task from base config if not already set
-    if st.session_state.get("summarizer_task") == "":
-        st.session_state["summarizer_task"] = str(base_config.get("summarizer_task", "") or "")
+    # Initialize dig deeper task from base config if not already set
+    if st.session_state.get("dig_deeper_task") == "":
+        st.session_state["dig_deeper_task"] = str(
+            base_config.get("dig_deeper_task")
+            or base_config.get("summarizer_task")
+            or ""
+        )
 
 
-def _parse_bool(value: Any) -> bool | None:
+def _parse_bool(value: Any) -> Optional[bool]:
     """Parse booleans from either bools or common string values."""
     if value is None:
         return None
@@ -168,7 +176,7 @@ def _parse_bool(value: Any) -> bool | None:
     return None
 
 
-def _mean_int(values: List[Any]) -> int | None:
+def _mean_int(values: List[Any]) -> Optional[int]:
     nums: List[int] = []
     for v in values:
         try:
@@ -180,35 +188,9 @@ def _mean_int(values: List[Any]) -> int | None:
     return int(round(sum(nums) / float(len(nums))))
 
 
-def _select_summary_examples(
-    *,
-    rows_true: List[Dict[str, Any]],
-    rows_false: List[Dict[str, Any]],
-    max_examples: int,
-) -> List[Dict[str, Any]]:
-    """Pick a roughly balanced set of examples (True/False) in a stable order."""
-    max_examples = max(1, int(max_examples))
-    # Keep deterministic ordering: createdAt then conversationId
-    def _key(r: Dict[str, Any]) -> str:
-        return str(r.get("createdAt") or "") + str(r.get("conversationId") or "")
-
-    rows_true = sorted(rows_true, key=_key)
-    rows_false = sorted(rows_false, key=_key)
-
-    if not rows_false:
-        return rows_true[:max_examples]
-    if not rows_true:
-        return rows_false[:max_examples]
-
-    half = max_examples // 2
-    picked = rows_true[:half] + rows_false[: (max_examples - half)]
-    return picked
-
-
-def _clear_summarizer_outputs() -> None:
-    """Clear cached summarizer outputs when inputs change."""
-    st.session_state["summarizer_stats"] = None
-    st.session_state["summarizer_output"] = None
+def _clear_dig_deeper_output() -> None:
+    """Clear cached dig-deeper outputs when inputs change."""
+    st.session_state["dig_deeper_output"] = None
 
 
 def _set_categories(categories: List[Dict[str, str]]) -> None:
@@ -447,11 +429,46 @@ def render_conversation_uploader_and_selector() -> None:
 
     st.success(f"Loaded {len(conversations)} conversations.")
 
+    # Evaluation-stage filter: minimum user messages
+    try:
+        max_user_msgs_all = max(int(c.get("userMessageCount") or 0) for c in conversations)
+    except Exception:
+        max_user_msgs_all = 50
+
+    # Clamp any stale session state
+    try:
+        current_min_um = int(st.session_state.get("eval_min_user_messages") or 0)
+    except Exception:
+        current_min_um = 0
+    current_min_um = max(0, min(int(max_user_msgs_all), current_min_um))
+    st.session_state["eval_min_user_messages"] = current_min_um
+
+    st.slider(
+        "Minimum user messages (filter before evaluation)",
+        min_value=0,
+        max_value=max(0, int(max_user_msgs_all)),
+        value=current_min_um,
+        key="eval_min_user_messages",
+    )
+
+    # Filter the available conversations before choosing N / sampling
+    def _um_count(conv: Dict[str, Any]) -> int:
+        try:
+            return int(conv.get("userMessageCount") or 0)
+        except Exception:
+            return 0
+
+    eligible = [c for c in conversations if _um_count(c) >= int(st.session_state.get("eval_min_user_messages") or 0)]
+    st.caption(f"Eligible conversations after filter: {len(eligible)} / {len(conversations)}")
+    if not eligible:
+        st.warning("No conversations match the minimum user messages filter. Lower the threshold to continue.")
+        return
+
     # Show a small preview of the first few conversations (metadata only)
-    preview_count = min(5, len(conversations))
+    preview_count = min(5, len(eligible))
     preview_rows: List[Dict[str, Any]] = []
     st.markdown("Conversations preview:")
-    for conv in conversations[:preview_count]:
+    for conv in eligible[:preview_count]:
         preview_rows.append(
             {
                 "conversationId": conv.get("conversationId", ""),
@@ -464,19 +481,29 @@ def render_conversation_uploader_and_selector() -> None:
     if preview_rows:
         st.dataframe(preview_rows, width="stretch")
 
-    max_n = min(MAX_CONVERSATIONS, len(conversations))
+    max_n = min(MAX_CONVERSATIONS, len(eligible))
     default_n = min(10, max_n)
 
-    st.session_state["num_to_evaluate"] = st.slider(
+    # Clamp stale session-state values so Streamlit doesn't error when max_n shrinks
+    try:
+        current_num = int(st.session_state.get("num_to_evaluate") or default_n)
+    except Exception:
+        current_num = default_n
+    current_num = max(1, min(int(max_n), current_num))
+    st.session_state["num_to_evaluate"] = current_num
+
+    st.slider(
         "Number of conversations to evaluate",
         min_value=1,
         max_value=max_n,
-        value=default_n,
+        value=current_num,
+        key="num_to_evaluate",
     )
 
-    st.session_state["sample_randomly"] = st.checkbox(
+    st.checkbox(
         f"Randomly sample conversations (instead of taking the first {st.session_state['num_to_evaluate']})",
         value=False,
+        key="sample_randomly",
     )
 
 
@@ -513,13 +540,28 @@ def validate_ready_to_run() -> tuple[bool, str | None]:
         logger.debug("Validation failed: no conversations loaded")
         return False, "No conversations loaded. Please upload a conversations JSON file."
 
+    # Apply the evaluation-stage min user message filter
+    try:
+        min_um = int(st.session_state.get("eval_min_user_messages") or 0)
+    except Exception:
+        min_um = 0
+    eligible_count = 0
+    for c in conversations:
+        try:
+            if int(c.get("userMessageCount") or 0) >= min_um:
+                eligible_count += 1
+        except Exception:
+            continue
+    if eligible_count == 0:
+        return False, "No conversations match the minimum user messages filter. Lower the threshold to continue."
+
     num = st.session_state.get("num_to_evaluate")
     if not isinstance(num, int) or num < 1:
         logger.debug(f"Validation failed: invalid num_to_evaluate ({num})")
         return False, "Invalid number of conversations to evaluate. Please select a valid number."
-    if num > min(MAX_CONVERSATIONS, len(conversations)):
-        logger.debug(f"Validation failed: num ({num}) exceeds max ({min(MAX_CONVERSATIONS, len(conversations))})")
-        return False, f"Number to evaluate ({num}) exceeds the maximum allowed ({min(MAX_CONVERSATIONS, len(conversations))}). Please select a smaller number."
+    if num > min(MAX_CONVERSATIONS, eligible_count):
+        logger.debug(f"Validation failed: num ({num}) exceeds max ({min(MAX_CONVERSATIONS, eligible_count)})")
+        return False, f"Number to evaluate ({num}) exceeds the maximum allowed ({min(MAX_CONVERSATIONS, eligible_count)}) after filtering. Please select a smaller number."
 
     if not os.getenv("ANTHROPIC_API_KEY"):
         logger.debug("Validation failed: ANTHROPIC_API_KEY not set")
@@ -535,6 +577,7 @@ def _run_evaluations_worker(
     conversations: List[Dict[str, Any]],
     num_to_evaluate: int,
     sample_randomly: bool,
+    eval_min_user_messages: int,
     evaluator_context: str,
     config_file_name: str,
     cancel_event: threading.Event,
@@ -570,17 +613,42 @@ def _run_evaluations_worker(
         evaluator = Evaluator(eval_config)
         logger.info("Evaluator created successfully")
 
-        max_n = min(MAX_CONVERSATIONS, len(conversations))
-        num = max(1, min(num_to_evaluate, max_n))
-        logger.info(f"Will evaluate {num} conversations (max_n={max_n}, requested={num_to_evaluate})")
+        # Apply evaluation-stage filter before sampling
+        try:
+            min_um = int(eval_min_user_messages or 0)
+        except Exception:
+            min_um = 0
+
+        eligible = []
+        for c in conversations:
+            try:
+                if int(c.get("userMessageCount") or 0) >= min_um:
+                    eligible.append(c)
+            except Exception:
+                continue
+
+        if not eligible:
+            progress_dict["progress"] = 0.0
+            progress_dict["status_text"] = "No eligible conversations to evaluate."
+            progress_dict["detail_text"] = "Lower the minimum user messages filter and try again."
+            progress_dict["results"] = []
+            progress_dict["csv_bytes"] = None
+            progress_dict["is_running"] = False
+            return
+
+        max_n = min(MAX_CONVERSATIONS, len(eligible))
+        num = max(1, min(int(num_to_evaluate), int(max_n)))
+        logger.info(
+            f"Will evaluate {num} conversations (eligible={len(eligible)}, max_n={max_n}, requested={num_to_evaluate}, min_user_messages={min_um})"
+        )
 
         if sample_randomly:
             logger.info("Sampling conversations randomly...")
             random.seed()
-            selected = random.sample(conversations, num)
+            selected = random.sample(eligible, num)
         else:
             logger.info("Taking first N conversations...")
-            selected = conversations[:num]
+            selected = eligible[:num]
         
         logger.info(f"Selected {len(selected)} conversations for evaluation")
 
@@ -814,170 +882,285 @@ def render_results_section() -> None:
             )
 
     st.markdown("---")
-    st.subheader("Summarize results")
+    st.subheader("Dig deeper")
+    st.markdown("""
+This section allows you to dig deeper into the evaluation results. 
 
-    # Ensure base config is loaded so we can access summarizer defaults
+To get a more focused assessment, it's useful to reduce the information to what you are really interested in. 
+
+You can:
+- select specific categories to analyze
+  - filter the rows to include only those that were successful/unsuccessful
+- include the conversation text in the analysis
+- only include conversations with a minimum number of user messages
+- specify the number of conversations to include in the analysis
+    """)
+
     _initialize_config_and_categories_from_base()
     base_config = load_base_config()
-    summarizer_system_prompt = str(base_config.get("summarizer_system_prompt", "") or "")
+    dig_deeper_system_prompt = str(base_config.get("dig_deeper_system_prompt") or "")
+    if not dig_deeper_system_prompt.strip():
+        st.error("Missing `dig_deeper_system_prompt` in config.")
+        return
+
 
     categories: List[Dict[str, str]] = st.session_state.get("categories") or []
     category_keys = [c.get("key", "") for c in categories if c.get("key")]
     if not category_keys:
-        st.info("No categories available to summarize.")
+        st.info("No categories available to dig into.")
         return
-
-    # Default selected category
-    if st.session_state.get("summarizer_selected_category_key") not in category_keys:
-        st.session_state["summarizer_selected_category_key"] = category_keys[0]
-        _clear_summarizer_outputs()
 
     def _format_cat(key: str) -> str:
         for c in categories:
             if c.get("key") == key:
-                label = c.get("label") or key
-                return f"{label}"
+                return str(c.get("label") or key)
         return key
 
-    selected_category_key = st.selectbox(
-        "Category",
+    max_selected = int(os.getenv("DIG_DEEPER_MAX_CATEGORIES", "10"))
+    if not st.session_state.get("dig_deeper_selected_categories"):
+        st.session_state["dig_deeper_selected_categories"] = category_keys[: min(2, max_selected)]
+
+    selected_categories: List[str] = st.multiselect(
+        "Categories (select multiple)",
         options=category_keys,
-        key="summarizer_selected_category_key",
+        default=st.session_state.get("dig_deeper_selected_categories") or [],
         format_func=_format_cat,
-        on_change=_clear_summarizer_outputs,
+        key="dig_deeper_selected_categories",
+        on_change=_clear_dig_deeper_output,
     )
 
-    # Task input (defaulted from config)
-    st.session_state["summarizer_task"] = st.text_area(
-        "Summarizer task",
-        value=st.session_state.get("summarizer_task", ""),
-        height=120,
-        on_change=_clear_summarizer_outputs,
-    )
+    if len(selected_categories) > max_selected:
+        st.warning(f"Limiting to {max_selected} categories (set `DIG_DEEPER_MAX_CATEGORIES` to change).")
+        selected_categories = selected_categories[:max_selected]
+        st.session_state["dig_deeper_selected_categories"] = selected_categories
 
-    # Compute stats for the selected category
-    eval_key = f"evaluation_{selected_category_key}"
-    reason_key = f"evaluation_{selected_category_key}_reasoning"
+    if not selected_categories:
+        st.info("Select at least one category to continue.")
+        return
 
-    rows_true: List[Dict[str, Any]] = []
-    rows_false: List[Dict[str, Any]] = []
-    for row in results:
-        b = _parse_bool(row.get(eval_key))
-        if b is True:
-            rows_true.append(row)
-        elif b is False:
-            rows_false.append(row)
+    # Category definitions for the payload (matches config expectations)
+    category_definitions: Dict[str, str] = {}
+    for c in categories:
+        k = c.get("key")
+        if k:
+            category_definitions[str(k)] = str(c.get("description", "") or "")
 
-    total_analyzed = len(rows_true) + len(rows_false)
-    success_rate_pct = (len(rows_true) / float(total_analyzed) * 100.0) if total_analyzed else 0.0
+    def _format_filter(code: str) -> str:
+        if code == "both":
+            return "all samples"
+        if code == "true":
+            return "successful samples only"
+        if code == "false":
+            return "unsuccessful samples only"
+        return str(code)
 
-    avg_user_msgs_true = _mean_int([r.get("userMessageCount") for r in rows_true])
-    avg_user_msgs_false = _mean_int([r.get("userMessageCount") for r in rows_false])
-    avg_user_chars_true = _mean_int([r.get("avgUserMessageCharacters") for r in rows_true])
-    avg_user_chars_false = _mean_int([r.get("avgUserMessageCharacters") for r in rows_false])
-
-    stats_block = {
-        "total_conversations_analyzed": total_analyzed,
-        "success_rate_percent": round(success_rate_pct, 1),
-        "avg_user_messages_true": avg_user_msgs_true,
-        "avg_user_messages_false": avg_user_msgs_false,
-        "avg_user_chars_true": avg_user_chars_true,
-        "avg_user_chars_false": avg_user_chars_false,
-    }
-
-    # Show stats immediately (even before calling the model)
-    st.markdown(
-        f"- **Total conversations analyzed**: `{stats_block['total_conversations_analyzed']}`\n"
-        f"- **Success rate**: `{stats_block['success_rate_percent']}%`"
-    )
-
-    st.dataframe(
-        [
-            {
-                "Metric": "Avg user messages",
-                "Successful Conversations": stats_block["avg_user_messages_true"],
-                "Unsuccessful Conversations": stats_block["avg_user_messages_false"],
-            },
-            {
-                "Metric": "Avg user characters",
-                "Successful Conversations": stats_block["avg_user_chars_true"],
-                "Unsuccessful Conversations": stats_block["avg_user_chars_false"],
-            },
-        ],
-        width="stretch",
-        hide_index=True,
-    )
-
-    # Summarize button
-    max_examples = int(os.getenv("SUMMARIZER_MAX_EXAMPLES", "25"))
-    cols2 = st.columns(3)
-    with cols2[1]:
-        run_summary = st.button("Summarize results", type="primary", width="stretch", disabled=total_analyzed == 0)
-
-    if run_summary:
-        if not summarizer_system_prompt:
-            st.error("Missing `summarizer_system_prompt` in config.")
-            return
-        task = (st.session_state.get("summarizer_task") or "").strip()
-        if not task:
-            st.error("Please provide a summarizer task.")
-            return
-
-        # Find description from the editable categories
-        category_description = ""
-        for c in categories:
-            if c.get("key") == selected_category_key:
-                category_description = c.get("description", "") or ""
-                break
-
-        examples = _select_summary_examples(
-            rows_true=rows_true,
-            rows_false=rows_false,
-            max_examples=max_examples,
+    st.markdown("**Row filters (per category):**")
+    category_filters: Dict[str, str] = {}
+    for cat in selected_categories:
+        category_filters[cat] = st.selectbox(
+            f"{_format_cat(cat)} rows",
+            options=["both", "true", "false"],
+            format_func=_format_filter,
+            index=0,
+            key=f"dd_filter_{cat}",
+            on_change=_clear_dig_deeper_output,
         )
 
-        # Build example rows with only the requested fields
-        example_rows: List[Dict[str, Any]] = []
-        for r in examples:
-            example_rows.append(
-                {
-                    "conversationId": r.get("conversationId", ""),
-                    "createdAt": r.get("createdAt", ""),
-                    "userMessageCount": r.get("userMessageCount", 0),
-                    "providerMessageCount": r.get("providerMessageCount", 0),
-                    "avgUserMessageCharacters": r.get("avgUserMessageCharacters", 0),
-                    "avgProviderMessageCharacters": r.get("avgProviderMessageCharacters", 0),
-                    eval_key: r.get(eval_key),
-                    reason_key: r.get(reason_key, ""),
-                }
-            )
+    include_conversation = st.checkbox(
+        "Include conversation text",
+        value=bool(st.session_state.get("dig_deeper_include_conversation", False)),
+        key="dig_deeper_include_conversation",
+        on_change=_clear_dig_deeper_output,
+    )
+    include_reasoning = True
 
-        with st.spinner("Summarizing results..."):
-            summarizer = Summarizer(
-                SummarizerConfig(
-                    system_prompt=summarizer_system_prompt,
+    # Row count limits
+    try:
+        max_user_msgs = max(int(r.get("userMessageCount") or 0) for r in results)
+    except Exception:
+        max_user_msgs = 50
+    min_user_messages = st.slider(
+        "Minimum number of user messages",
+        min_value=0,
+        max_value=max(0, int(max_user_msgs)),
+        value=int(st.session_state.get("dig_deeper_min_user_messages") or 0),
+        key="dig_deeper_min_user_messages",
+        on_change=_clear_dig_deeper_output,
+    )
+
+    max_rows_cap = min(200, len(results))
+    # Clamp stale session state before constructing the slider; Streamlit validates the
+    # state value against max_value and will crash if it's out of range.
+    try:
+        current_dd_max_rows = int(st.session_state.get("dig_deeper_max_rows") or 25)
+    except Exception:
+        current_dd_max_rows = 25
+    current_dd_max_rows = max(1, min(int(max_rows_cap) if max_rows_cap else 1, current_dd_max_rows))
+    st.session_state["dig_deeper_max_rows"] = current_dd_max_rows
+
+    max_rows = st.slider(
+        "Number of conversations to include",
+        min_value=1,
+        max_value=max(1, max_rows_cap),
+        value=current_dd_max_rows,
+        key="dig_deeper_max_rows",
+        on_change=_clear_dig_deeper_output,
+    )
+
+    def _row_passes_filters(row: Dict[str, Any]) -> bool:
+        try:
+            if int(row.get("userMessageCount") or 0) < int(min_user_messages):
+                return False
+        except Exception:
+            return False
+
+        for cat in selected_categories:
+            eval_key = f"evaluation_{cat}"
+            b = _parse_bool(row.get(eval_key))
+            if b is None:
+                return False
+            f = (category_filters.get(cat) or "both").lower()
+            if f == "true" and b is not True:
+                return False
+            if f == "false" and b is not False:
+                return False
+        return True
+
+    filtered_rows = [r for r in results if _row_passes_filters(r)]
+
+    def _stable_key(r: Dict[str, Any]) -> str:
+        return str(r.get("createdAt") or "") + str(r.get("conversationId") or "")
+
+    filtered_rows = sorted(filtered_rows, key=_stable_key)
+    table_rows = filtered_rows[:max_rows]
+
+    st.markdown(f"- **Rows matching filters**: `{len(filtered_rows)}`")
+    if not table_rows:
+        st.info("No rows match the current filters.")
+        return
+
+    # Build a compact table view
+    preview: List[Dict[str, Any]] = []
+    for r in table_rows:
+        out: Dict[str, Any] = {
+            "conversationId": r.get("conversationId", ""),
+            "createdAt": r.get("createdAt", ""),
+            "userMessageCount": r.get("userMessageCount", 0),
+            "providerMessageCount": r.get("providerMessageCount", 0),
+            "avgUserMessageCharacters": r.get("avgUserMessageCharacters", 0),
+            "avgProviderMessageCharacters": r.get("avgProviderMessageCharacters", 0),
+        }
+        for cat in selected_categories:
+            out[f"evaluation_{cat}"] = _parse_bool(r.get(f"evaluation_{cat}"))
+            out[f"evaluation_{cat}_reasoning"] = r.get(f"evaluation_{cat}_reasoning", "")
+        if include_conversation:
+            conv = r.get("conversation", "") or ""
+            if isinstance(conv, str) and len(conv) > 300:
+                out["conversation"] = conv[:300] + "..."
+            else:
+                out["conversation"] = conv
+        preview.append(out)
+
+    st.dataframe(preview, width="stretch")
+
+    st.text_area(
+        "Dig deeper task",
+        key="dig_deeper_task",
+        height=140,
+        on_change=_clear_dig_deeper_output,
+    )
+
+    max_examples_for_model = int(os.getenv("DIG_DEEPER_MAX_EXAMPLES", "25"))
+    max_conversation_chars = int(os.getenv("DIG_DEEPER_MAX_CONVERSATION_CHARS", "20000"))
+    rows_for_model = filtered_rows[: min(max_examples_for_model, max_rows, len(filtered_rows))]
+
+    # Compute per-category success stats across the full results set (not just filtered rows)
+    # so it reflects overall evaluator performance.
+    category_stats: Dict[str, Dict[str, Any]] = {}
+    for cat in selected_categories:
+        eval_key = f"evaluation_{cat}"
+        t = 0
+        f = 0
+        for r in results:
+            b = _parse_bool(r.get(eval_key))
+            if b is True:
+                t += 1
+            elif b is False:
+                f += 1
+        denom = t + f
+        category_stats[cat] = {
+            "true_count": t,
+            "false_count": f,
+            "success_rate": round((t / float(denom)), 4) if denom else 0.0,
+        }
+
+    # Human-readable filter labels for the prompt payload
+    category_filters_for_prompt: Dict[str, str] = {
+        k: _format_filter(v) for k, v in category_filters.items()
+    }
+
+    cols3 = st.columns(3)
+    with cols3[1]:
+        run_dd = st.button(
+            "Dig deeper",
+            type="primary",
+            width="stretch",
+            disabled=len(rows_for_model) == 0,
+        )
+
+    if run_dd:
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            st.error("ANTHROPIC_API_KEY is not set in the environment. Please set the API key.")
+            return
+        task = (st.session_state.get("dig_deeper_task") or "").strip()
+        if not task:
+            st.error("Please provide a dig deeper task.")
+            return
+
+        payload_rows: List[Dict[str, Any]] = []
+        for r in rows_for_model:
+            out: Dict[str, Any] = {
+                "conversationId": r.get("conversationId", ""),
+                "createdAt": r.get("createdAt", ""),
+                "userMessageCount": r.get("userMessageCount", 0),
+                "providerMessageCount": r.get("providerMessageCount", 0),
+                "avgUserMessageCharacters": r.get("avgUserMessageCharacters", 0),
+                "avgProviderMessageCharacters": r.get("avgProviderMessageCharacters", 0),
+            }
+            for cat in selected_categories:
+                out[f"evaluation_{cat}"] = _parse_bool(r.get(f"evaluation_{cat}"))
+                out[f"evaluation_{cat}_reasoning"] = r.get(f"evaluation_{cat}_reasoning", "")
+            if include_conversation:
+                out["conversation"] = r.get("conversation", "") or ""
+            payload_rows.append(out)
+
+        with st.spinner("Digging deeper..."):
+            dig_deeper = DigDeeper(
+                DigDeeperConfig(
+                    system_prompt=dig_deeper_system_prompt,
                     model_name=(st.session_state.get("config") or {}).get("model_name", ""),
                     config_file=st.session_state.get("config_file_name") or "",
                 )
             )
-            summary_result = summarizer.summarize_category(
+            result = dig_deeper.run(
                 task=task,
-                category_key=selected_category_key,
-                category_description=category_description,
-                true_count=len(rows_true),
-                false_count=len(rows_false),
-                success_rate=(len(rows_true) / float(total_analyzed)) if total_analyzed else 0.0,
-                examples=example_rows,
+                selected_categories=selected_categories,
+                category_definitions=category_definitions,
+                category_stats=category_stats,
+                category_filters=category_filters_for_prompt,
+                rows=payload_rows,
+                include_conversation=include_conversation,
+                include_reasoning=include_reasoning,
                 max_tokens=1200,
+                max_conversation_chars=max_conversation_chars,
             )
 
-        st.session_state["summarizer_stats"] = stats_block
-        st.session_state["summarizer_output"] = summary_result.text
+        st.session_state["dig_deeper_output"] = result.text
         st.rerun()
 
-    if st.session_state.get("summarizer_output"):
-        st.markdown("### Summary")
-        st.markdown(str(st.session_state["summarizer_output"]))
+    if st.session_state.get("dig_deeper_output"):
+        st.markdown("### Output")
+        st.markdown(str(st.session_state["dig_deeper_output"]))
 
 
 def main() -> None:
@@ -1068,6 +1251,7 @@ def main() -> None:
         conversations = st.session_state["conversations"]
         num_to_evaluate = st.session_state["num_to_evaluate"]
         sample_randomly = st.session_state["sample_randomly"]
+        eval_min_user_messages = st.session_state.get("eval_min_user_messages", 0)
         evaluator_context = st.session_state.get("evaluator_context", "")
         config_file_name = st.session_state.get("config_file_name", "default_config.json")
         
@@ -1084,6 +1268,7 @@ def main() -> None:
                 conversations,
                 num_to_evaluate,
                 sample_randomly,
+                eval_min_user_messages,
                 evaluator_context,
                 config_file_name,
                 cancel_event,
