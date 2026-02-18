@@ -998,21 +998,26 @@ You can:
     max_rows_cap = min(200, len(results))
     # Clamp stale session state before constructing the slider; Streamlit validates the
     # state value against max_value and will crash if it's out of range.
-    try:
-        current_dd_max_rows = int(st.session_state.get("dig_deeper_max_rows") or 25)
-    except Exception:
-        current_dd_max_rows = 25
-    current_dd_max_rows = max(1, min(int(max_rows_cap) if max_rows_cap else 1, current_dd_max_rows))
-    st.session_state["dig_deeper_max_rows"] = current_dd_max_rows
+    if "dig_deeper_max_rows" in st.session_state:
+        try:
+            current_dd_max_rows = int(st.session_state["dig_deeper_max_rows"])
+        except Exception:
+            current_dd_max_rows = 25
+        st.session_state["dig_deeper_max_rows"] = max(1, min(max(1, max_rows_cap), current_dd_max_rows))
 
-    max_rows = st.slider(
-        "Number of conversations to include",
-        min_value=1,
-        max_value=max(1, max_rows_cap),
-        value=current_dd_max_rows,
-        key="dig_deeper_max_rows",
-        on_change=_clear_dig_deeper_output,
-    )
+    if max_rows_cap <= 1:
+        st.session_state["dig_deeper_max_rows"] = max(1, max_rows_cap)
+        max_rows = max(1, max_rows_cap)
+        st.markdown(f"**Number of conversations to include:** {max_rows}")
+    else:
+        max_rows = st.slider(
+            "Number of conversations to include",
+            min_value=1,
+            max_value=max_rows_cap,
+            value=min(25, max_rows_cap),
+            key="dig_deeper_max_rows",
+            on_change=_clear_dig_deeper_output,
+        )
 
     def _row_passes_filters(row: Dict[str, Any]) -> bool:
         try:
