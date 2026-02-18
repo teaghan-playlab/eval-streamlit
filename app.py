@@ -495,13 +495,17 @@ def render_conversation_uploader_and_selector() -> None:
             current_num = default_n
         st.session_state["num_to_evaluate"] = max(1, min(max_n, current_num))
 
-    st.slider(
-        "Number of conversations to evaluate",
-        min_value=1,
-        max_value=max_n,
-        value=default_n,
-        key="num_to_evaluate",
-    )
+    if max_n <= 1:
+        st.session_state["num_to_evaluate"] = max_n
+        st.markdown(f"**Number of conversations to evaluate:** {max_n}")
+    else:
+        st.slider(
+            "Number of conversations to evaluate",
+            min_value=1,
+            max_value=max_n,
+            value=default_n,
+            key="num_to_evaluate",
+        )
 
     st.checkbox(
         f"Randomly sample conversations (instead of taking the first {st.session_state['num_to_evaluate']})",
