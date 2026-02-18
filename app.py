@@ -387,11 +387,14 @@ def render_categories_editor() -> None:
     # Allow user to download the current evaluator config (system prompt,
     # model name, categories, and context) as JSON for reuse in future runs.
     cfg = st.session_state.get("config") or {}
+    base_cfg = load_base_config()
     config_payload = {
         "system_prompt": cfg.get("system_prompt", ""),
         "model_name": cfg.get("model_name", ""),
         "categories": categories_to_fields(updated_categories),
         "context": st.session_state.get("evaluator_context", ""),
+        "dig_deeper_system_prompt": str(base_cfg.get("dig_deeper_system_prompt", "")),
+        "dig_deeper_task": st.session_state.get("dig_deeper_task", ""),
     }
     config_json = json.dumps(config_payload, indent=2)
 
@@ -485,18 +488,18 @@ def render_conversation_uploader_and_selector() -> None:
     default_n = min(10, max_n)
 
     # Clamp stale session-state values so Streamlit doesn't error when max_n shrinks
-    try:
-        current_num = int(st.session_state.get("num_to_evaluate") or default_n)
-    except Exception:
-        current_num = default_n
-    current_num = max(1, min(int(max_n), current_num))
-    st.session_state["num_to_evaluate"] = current_num
+    if "num_to_evaluate" in st.session_state:
+        try:
+            current_num = int(st.session_state["num_to_evaluate"])
+        except Exception:
+            current_num = default_n
+        st.session_state["num_to_evaluate"] = max(1, min(max_n, current_num))
 
     st.slider(
         "Number of conversations to evaluate",
         min_value=1,
         max_value=max_n,
-        value=current_num,
+        value=default_n,
         key="num_to_evaluate",
     )
 
