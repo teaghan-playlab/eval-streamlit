@@ -439,20 +439,24 @@ def render_conversation_uploader_and_selector() -> None:
         max_user_msgs_all = 50
 
     # Clamp any stale session state
-    try:
-        current_min_um = int(st.session_state.get("eval_min_user_messages") or 0)
-    except Exception:
-        current_min_um = 0
-    current_min_um = max(0, min(int(max_user_msgs_all), current_min_um))
-    st.session_state["eval_min_user_messages"] = current_min_um
+    if "eval_min_user_messages" in st.session_state:
+        try:
+            current_min_um = int(st.session_state["eval_min_user_messages"])
+        except Exception:
+            current_min_um = 0
+        st.session_state["eval_min_user_messages"] = max(0, min(int(max_user_msgs_all), current_min_um))
 
-    st.slider(
-        "Minimum user messages (filter before evaluation)",
-        min_value=0,
-        max_value=max(0, int(max_user_msgs_all)),
-        value=current_min_um,
-        key="eval_min_user_messages",
-    )
+    if int(max_user_msgs_all) < 1:
+        st.session_state["eval_min_user_messages"] = 0
+        st.markdown("**Minimum user messages (filter before evaluation):** 0")
+    else:
+        st.slider(
+            "Minimum user messages (filter before evaluation)",
+            min_value=0,
+            max_value=int(max_user_msgs_all),
+            value=0,
+            key="eval_min_user_messages",
+        )
 
     # Filter the available conversations before choosing N / sampling
     def _um_count(conv: Dict[str, Any]) -> int:
@@ -986,14 +990,19 @@ You can:
         max_user_msgs = max(int(r.get("userMessageCount") or 0) for r in results)
     except Exception:
         max_user_msgs = 50
-    min_user_messages = st.slider(
-        "Minimum number of user messages",
-        min_value=0,
-        max_value=max(0, int(max_user_msgs)),
-        value=int(st.session_state.get("dig_deeper_min_user_messages") or 0),
-        key="dig_deeper_min_user_messages",
-        on_change=_clear_dig_deeper_output,
-    )
+    if int(max_user_msgs) < 1:
+        st.session_state["dig_deeper_min_user_messages"] = 0
+        min_user_messages = 0
+        st.markdown("**Minimum number of user messages:** 0")
+    else:
+        min_user_messages = st.slider(
+            "Minimum number of user messages",
+            min_value=0,
+            max_value=int(max_user_msgs),
+            value=int(st.session_state.get("dig_deeper_min_user_messages") or 0),
+            key="dig_deeper_min_user_messages",
+            on_change=_clear_dig_deeper_output,
+        )
 
     max_rows_cap = min(200, len(results))
     # Clamp stale session state before constructing the slider; Streamlit validates the
