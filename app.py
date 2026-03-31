@@ -83,6 +83,7 @@ def ensure_session_state_keys() -> None:
         "sample_randomly": False,
         # Evaluation-stage filtering
         "eval_min_user_messages": 0,
+        "eval_max_user_messages": None,  # None means no upper bound
         "results": [],
         "csv_bytes": None,
         # Result inspection state
@@ -432,7 +433,7 @@ def render_conversation_uploader_and_selector() -> None:
 
     st.success(f"Loaded {len(conversations)} conversations.")
 
-    # Evaluation-stage filter: minimum user messages
+    # Evaluation-stage filter: minimum and maximum user messages
     try:
         max_user_msgs_all = max(int(c.get("userMessageCount") or 0) for c in conversations)
     except Exception:
@@ -446,17 +447,39 @@ def render_conversation_uploader_and_selector() -> None:
             current_min_um = 0
         st.session_state["eval_min_user_messages"] = max(0, min(int(max_user_msgs_all), current_min_um))
 
+    if "eval_max_user_messages" in st.session_state:
+        if st.session_state["eval_max_user_messages"] is None:
+            # Replace None with the actual max so the slider gets a valid int
+            st.session_state["eval_max_user_messages"] = int(max_user_msgs_all)
+        else:
+            try:
+                current_max_um = int(st.session_state["eval_max_user_messages"])
+            except Exception:
+                current_max_um = int(max_user_msgs_all)
+            st.session_state["eval_max_user_messages"] = max(0, min(int(max_user_msgs_all), current_max_um))
+
     if int(max_user_msgs_all) < 1:
         st.session_state["eval_min_user_messages"] = 0
-        st.markdown("**Minimum user messages (filter before evaluation):** 0")
+        st.session_state["eval_max_user_messages"] = 0
+        st.markdown("**User messages filter (before evaluation):** 0")
     else:
-        st.slider(
-            "Minimum user messages (filter before evaluation)",
-            min_value=0,
-            max_value=int(max_user_msgs_all),
-            value=0,
-            key="eval_min_user_messages",
-        )
+        col_min, col_max = st.columns(2)
+        with col_min:
+            st.slider(
+                "Minimum user messages",
+                min_value=0,
+                max_value=int(max_user_msgs_all),
+                value=0,
+                key="eval_min_user_messages",
+            )
+        with col_max:
+            st.slider(
+                "Maximum user messages",
+                min_value=0,
+                max_value=int(max_user_msgs_all),
+                value=int(max_user_msgs_all),
+                key="eval_max_user_messages",
+            )
 
     # Filter the available conversations before choosing N / sampling
     def _um_count(conv: Dict[str, Any]) -> int:
@@ -465,10 +488,13 @@ def render_conversation_uploader_and_selector() -> None:
         except Exception:
             return 0
 
-    eligible = [c for c in conversations if _um_count(c) >= int(st.session_state.get("eval_min_user_messages") or 0)]
+    _min_um = int(st.session_state.get("eval_min_user_messages") or 0)
+    _max_um_raw = st.session_state.get("eval_max_user_messages")
+    _max_um = int(_max_um_raw) if _max_um_raw is not None else None
+    eligible = [c for c in conversations if _um_count(c) >= _min_um and (_max_um is None or _um_count(c) <= _max_um)]
     st.caption(f"Eligible conversations after filter: {len(eligible)} / {len(conversations)}")
     if not eligible:
-        st.warning("No conversations match the minimum user messages filter. Lower the threshold to continue.")
+        st.warning("No conversations match the user messages filter. Adjust the min/max thresholds to continue.")
         return
 
     # Show a small preview of the first few conversations (metadata only)
@@ -551,20 +577,26 @@ def validate_ready_to_run() -> tuple[bool, str | None]:
         logger.debug("Validation failed: no conversations loaded")
         return False, "No conversations loaded. Please upload a conversations JSON file."
 
-    # Apply the evaluation-stage min user message filter
+    # Apply the evaluation-stage min/max user message filter
     try:
         min_um = int(st.session_state.get("eval_min_user_messages") or 0)
     except Exception:
         min_um = 0
+    max_um_raw = st.session_state.get("eval_max_user_messages")
+    try:
+        max_um = int(max_um_raw) if max_um_raw is not None else None
+    except Exception:
+        max_um = None
     eligible_count = 0
     for c in conversations:
         try:
-            if int(c.get("userMessageCount") or 0) >= min_um:
+            count = int(c.get("userMessageCount") or 0)
+            if count >= min_um and (max_um is None or count <= max_um):
                 eligible_count += 1
         except Exception:
             continue
     if eligible_count == 0:
-        return False, "No conversations match the minimum user messages filter. Lower the threshold to continue."
+        return False, "No conversations match the user messages filter. Adjust the min/max thresholds to continue."
 
     num = st.session_state.get("num_to_evaluate")
     if not isinstance(num, int) or num < 1:
@@ -589,6 +621,7 @@ def _run_evaluations_worker(
     num_to_evaluate: int,
     sample_randomly: bool,
     eval_min_user_messages: int,
+    eval_max_user_messages: Optional[int],
     evaluator_context: str,
     config_file_name: str,
     cancel_event: threading.Event,
@@ -629,11 +662,16 @@ def _run_evaluations_worker(
             min_um = int(eval_min_user_messages or 0)
         except Exception:
             min_um = 0
+        try:
+            max_um = int(eval_max_user_messages) if eval_max_user_messages is not None else None
+        except Exception:
+            max_um = None
 
         eligible = []
         for c in conversations:
             try:
-                if int(c.get("userMessageCount") or 0) >= min_um:
+                count = int(c.get("userMessageCount") or 0)
+                if count >= min_um and (max_um is None or count <= max_um):
                     eligible.append(c)
             except Exception:
                 continue
@@ -650,7 +688,7 @@ def _run_evaluations_worker(
         max_n = min(MAX_CONVERSATIONS, len(eligible))
         num = max(1, min(int(num_to_evaluate), int(max_n)))
         logger.info(
-            f"Will evaluate {num} conversations (eligible={len(eligible)}, max_n={max_n}, requested={num_to_evaluate}, min_user_messages={min_um})"
+            f"Will evaluate {num} conversations (eligible={len(eligible)}, max_n={max_n}, requested={num_to_evaluate}, min_user_messages={min_um}, max_user_messages={max_um})"
         )
 
         if sample_randomly:
@@ -1273,6 +1311,7 @@ def main() -> None:
         num_to_evaluate = st.session_state["num_to_evaluate"]
         sample_randomly = st.session_state["sample_randomly"]
         eval_min_user_messages = st.session_state.get("eval_min_user_messages", 0)
+        eval_max_user_messages = st.session_state.get("eval_max_user_messages", None)
         evaluator_context = st.session_state.get("evaluator_context", "")
         config_file_name = st.session_state.get("config_file_name", "default_config.json")
         
@@ -1290,6 +1329,7 @@ def main() -> None:
                 num_to_evaluate,
                 sample_randomly,
                 eval_min_user_messages,
+                eval_max_user_messages,
                 evaluator_context,
                 config_file_name,
                 cancel_event,
