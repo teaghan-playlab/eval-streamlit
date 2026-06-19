@@ -787,9 +787,9 @@ def render_results_section() -> None:
         return
     st.markdown("**Preview:**")
 
-    # Show a small table of key columns (omit full conversation for readability)
+    # Show a table of key columns (omit full conversation for readability)
     display_rows: List[Dict[str, Any]] = []
-    for row in results[:10]:
+    for row in results[:50]:
         base_row: Dict[str, Any] = {
             "conversationId": row.get("conversationId", ""),
             #"evaluationSuccessful": not row.get("evaluation_decode_failed", False),
@@ -807,7 +807,7 @@ def render_results_section() -> None:
 
         display_rows.append(base_row)
 
-    st.dataframe(display_rows, width="stretch")
+    st.dataframe(display_rows, width="stretch", height=400)
 
     total_results = len(results)
     idx_from_state = st.session_state.get("selected_result_idx", 0)
