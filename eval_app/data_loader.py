@@ -148,17 +148,25 @@ def load_conversations_from_file(file_path: Path) -> List[Dict[str, Any]]:
         
     Returns:
         List of conversation dictionaries with extracted fields
+
+    Raises:
+        ValueError: If the file is not valid JSON or cannot be read. A truncated
+            download is the most common cause, so the message says so.
     """
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except json.JSONDecodeError as e:
         logging.error(f"Failed to parse JSON file {file_path}: {e}")
-        return []
+        raise ValueError(
+            "The file is not valid JSON, which usually means the download was "
+            f"cut off before it finished. Parsing stopped at line {e.lineno}, "
+            f"column {e.colno}: {e.msg}."
+        ) from e
     except Exception as e:
         logging.error(f"Error reading file {file_path}: {e}")
-        return []
-    
+        raise ValueError(f"The file could not be read: {e}") from e
+
     conversations = data.get("conversations", [])
     if not conversations:
         logging.warning(f"No conversations found in {file_path}")
@@ -254,7 +262,11 @@ def load_all_conversations(data_dir: Path) -> List[Dict[str, Any]]:
     
     for json_file in json_files:
         logging.info(f"Processing {json_file.name}")
-        conversations = load_conversations_from_file(json_file)
+        try:
+            conversations = load_conversations_from_file(json_file)
+        except ValueError as e:
+            logging.error(f"Skipping {json_file.name}: {e}")
+            continue
         all_conversations.extend(conversations)
         logging.info(f"Loaded {len(conversations)} conversation(s) from {json_file.name}")
     

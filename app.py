@@ -416,13 +416,15 @@ def render_conversation_uploader_and_selector() -> None:
             tmp.write(uploaded.getvalue())
             tmp_path = Path(tmp.name)
 
-        with st.spinner("Loading conversations..."):
-            conversations = load_conversations_from_file(tmp_path)
-
-        if not conversations:
-            st.error("No conversations found in the uploaded file.")
-        else:
-            st.session_state["conversations"] = conversations
+        try:
+            with st.spinner("Loading conversations..."):
+                conversations = load_conversations_from_file(tmp_path)
+            if conversations:
+                st.session_state["conversations"] = conversations
+            else:
+                st.error("No conversations found in the uploaded file.")
+        except ValueError as e:
+            st.error(f"Could not read the uploaded file. {e}")
 
     conversations: List[Dict[str, Any]] = st.session_state["conversations"]
 
