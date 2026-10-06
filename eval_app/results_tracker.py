@@ -4,13 +4,6 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 
-# The full conversation transcript is never written to CSV. A single transcript
-# can run to hundreds of thousands of characters with thousands of embedded line
-# breaks, which exceeds spreadsheet cell limits (Excel caps a cell at 32,767
-# characters, Google Sheets at 50,000) and corrupts the layout so that only the
-# first handful of rows appear to contain data.
-EXCLUDED_CSV_COLUMNS = frozenset({"conversation"})
-
 # Cap every exported cell comfortably below Excel's per-cell limit of 32,767
 # characters so no single value can overflow into neighbouring cells or rows.
 MAX_CSV_CELL_CHARS = 32000
@@ -44,11 +37,6 @@ def _sanitize_cell(value: Any, max_chars: int = MAX_CSV_CELL_CHARS) -> str:
     return text
 
 
-def _export_fieldnames(fieldnames: List[str]) -> List[str]:
-    """Drop columns that must never appear in a CSV export."""
-    return [name for name in fieldnames if name not in EXCLUDED_CSV_COLUMNS]
-
-
 def write_results_to_csv(
     results: List[Dict[str, Any]],
     output_path: Path,
@@ -77,9 +65,6 @@ def write_results_to_csv(
         for result in results:
             all_keys.update(result.keys())
         fieldnames = sorted(list(all_keys))
-
-    # Drop excluded columns (e.g. the full conversation transcript)
-    fieldnames = _export_fieldnames(fieldnames)
 
     # Write CSV
     with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
@@ -130,9 +115,6 @@ def append_results_to_csv(
             for result in results:
                 all_keys.update(result.keys())
             fieldnames = sorted(list(all_keys))
-        # Drop excluded columns only when creating the file; an existing file's
-        # header is respected as-is to keep columns aligned.
-        fieldnames = _export_fieldnames(fieldnames)
 
     # Append to CSV
     with open(output_path, "a", newline="", encoding="utf-8") as csvfile:
