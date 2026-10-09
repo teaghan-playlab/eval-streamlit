@@ -440,8 +440,11 @@ def render_conversation_uploader_and_selector() -> None:
     except Exception:
         max_user_msgs_all = 50
 
-    # Clamp any stale session state
-    if "eval_user_messages_range" in st.session_state and st.session_state["eval_user_messages_range"] is not None:
+    # Clamp any stale session state. Streamlit renders the slider from session
+    # state rather than `value`, so the initial None must become a real range.
+    if st.session_state.get("eval_user_messages_range") is None:
+        st.session_state["eval_user_messages_range"] = (0, int(max_user_msgs_all))
+    else:
         try:
             lo, hi = st.session_state["eval_user_messages_range"]
             lo = max(0, min(int(max_user_msgs_all), int(lo)))
