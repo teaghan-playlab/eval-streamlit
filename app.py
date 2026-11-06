@@ -410,8 +410,10 @@ def render_conversation_uploader_and_selector() -> None:
     """Render uploader for conversations JSON and selection controls."""
     uploaded = st.file_uploader("Upload conversations JSON file extracted from Playlab", type="json")
 
-    if uploaded is not None:
-        # Persist uploaded file to a temporary path so we can reuse the existing loader
+    # The uploader returns the same file on every rerun, and the progress loop
+    # reruns twice a second, so only parse a file the first time we see it.
+    if uploaded is not None and st.session_state.get("loaded_upload_id") != uploaded.file_id:
+        st.session_state["loaded_upload_id"] = uploaded.file_id
         with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
             tmp.write(uploaded.getvalue())
             tmp_path = Path(tmp.name)
@@ -425,6 +427,8 @@ def render_conversation_uploader_and_selector() -> None:
                 st.error("No conversations found in the uploaded file.")
         except ValueError as e:
             st.error(f"Could not read the uploaded file. {e}")
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     conversations: List[Dict[str, Any]] = st.session_state["conversations"]
 
